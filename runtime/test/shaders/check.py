@@ -341,7 +341,10 @@ FMT_D16_XYZ_WORDS = [
 GLOBAL_OFFSET = [("cs_global_neg_offset", "40", [0x5EED1FFC, 0x8BAD1800, 0x5EED1FF0, 0x5EED1FF4,
                                                  0x0000009E, 0xFFFF8BAD, 0x57023FFC, 0xEEEEEEEE]),
                  # global/buffer atomics, 8/16-bit global stores and d16 loads with CPU-only checks until now
-                 ("cs_global_mem_ext", "40", [0x5, 0xC, 0x977, 0xFFF00000, 0xEDCB5678, 0xEF332211, 0x887766BE, 0xFF801234])]
+                 ("cs_global_mem_ext", "40", [0x5, 0xC, 0x977, 0xFFF00000, 0xEDCB5678, 0xEF332211, 0x887766BE, 0xFF801234]),
+                 # global/buffer_atomic_csub: the clamp at 0, glc, and 32 lanes on one dword (cases in the .asm header)
+                 ("cs_global_csub", "40", [0x10070905, 0x0D070000, 0x00630064, 0x80000000, 0x00000000,
+                                           0xFFFFFFFE, 0x000C0500, 0x01D800D2])]
 # cs_heap_init.asm: vk_compute_test's VKC_HEAP_INIT copies this file (zeros, then four words at 0x100) to the start
 # of the heap; the shader copies the four words to 0, and out[4..7] are the file's zeros, not the 0xEE fill.
 HEAP_INIT_WORDS = [0x1BADB002, 0xCAFEF00D, 0x80000001, 0x0000FFFF]

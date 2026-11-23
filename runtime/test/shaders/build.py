@@ -73,17 +73,28 @@ def barycentric_fallback():
         return False
 
 
-def asm_mattr(path):
+def asm_header_value(path, key):
+    """The value of "; <key>: <value>" in a fixture's leading comment lines, or None."""
     for ln in Path(path).read_text(encoding="utf-8").splitlines():
         s = ln.strip()
         if not s:
             continue
         if not s.startswith(";"):
             break
-        m = re.match(r";\s*mattr:\s*(\S+)", s)
+        m = re.match(r";\s*" + key + r":\s*(\S+)", s)
         if m:
             return m.group(1)
     return None
+
+
+def asm_mattr(path):
+    return asm_header_value(path, "mattr")
+
+
+def asm_mcpu(path):
+    """llvm-mc's -mcpu for a fixture: gfx1013, or "; mcpu: <cpu>" for one that needs another target (GFX10.3-only
+    instructions such as global_atomic_csub, which gfx1013 rejects)."""
+    return asm_header_value(path, "mcpu") or "gfx1013"
 
 
 CLIP_CASES = {"vs_clip": 1, "vs_clip_param4": 4, "vs_clip_undeclared": 1}
@@ -158,7 +169,7 @@ def translate_tests(work, names):
         if shift and n.startswith("cs_"):
             raw = shift_user_data(raw, shift)
         mattr = asm_mattr(asm_path)
-        cmd = MC + ["-triple=amdgcn--amdpal", "-mcpu=gfx1013"]
+        cmd = MC + ["-triple=amdgcn--amdpal", f"-mcpu={asm_mcpu(asm_path)}"]
         if n in CLIP_CASES:
             cmd.append(f"-defsym=PARAM_SLOT={CLIP_CASES[n]}")
         if mattr:

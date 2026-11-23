@@ -384,7 +384,9 @@ class Rdna2DecodeUnitTests(unittest.TestCase):
             m = re.search(r"^;\s*mattr:\s*(\S+)", txt, re.M)
             mattr = m.group(1) if m else ""
             wave32 = "-wavefrontsize32" not in mattr and "+wavefrontsize64" not in mattr
-            cmd = [mc, "-triple=amdgcn--amdpal", "-mcpu=gfx1013", "-show-encoding"]
+            m = re.search(r"^;\s*mcpu:\s*(\S+)", txt, re.M)   # a fixture with GFX10.3-only instructions
+            mcpu = m.group(1) if m else "gfx1013"
+            cmd = [mc, "-triple=amdgcn--amdpal", f"-mcpu={mcpu}", "-show-encoding"]
             if mattr:
                 cmd.append("-mattr=" + mattr)
             if os.path.basename(path) == "vs_clip.asm":
@@ -399,7 +401,7 @@ class Rdna2DecodeUnitTests(unittest.TestCase):
                 ins = shader_ir.parse_line(ln)
                 if ins and ins["enc"]:
                     raw.extend(bytes.fromhex(ins["enc"]))
-            dcmd = [mc, "-disassemble", "-triple=amdgcn--amdpal", "-mcpu=gfx1013", "-show-encoding"]
+            dcmd = [mc, "-disassemble", "-triple=amdgcn--amdpal", f"-mcpu={mcpu}", "-show-encoding"]
             if mattr:
                 dcmd.append("-mattr=" + mattr)
             dr = subprocess.run(dcmd, input=" ".join(f"0x{b:02x}" for b in raw), text=True, capture_output=True)
