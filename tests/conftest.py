@@ -167,17 +167,23 @@ class Shader:
             rsrc2, (lx, ly, lz) = cs_header
             (workdir / "fssm").mkdir(exist_ok=True)
             (workdir / "fssm" / f"{name}.fssm").write_bytes(bytes(0x138) + struct.pack("<4I", rsrc2, lx, ly, lz))
-        cmd = LLVM_MC + ["-triple=amdgcn--amdpal", "-mcpu=gfx1013"]
+        # gfx1013 unless the leading comment names another target ("; mcpu: gfx1030" for GFX10.3-only instructions,
+        # as runtime/test/shaders/build.py and scripts/run_gpu_tests.py read it), plus an optional "; mattr:".
+        mcpu, mattr = "gfx1013", None
         for ln in asm.splitlines():
             s = ln.strip()
             if not s:
                 continue
             if not s.startswith(";"):
                 break
-            m = re.match(r";\s*mattr:\s*(\S+)", s)
-            if m:
-                cmd.append(f"-mattr={m.group(1)}")
-                break
+            m = re.match(r";\s*(mcpu|mattr):\s*(\S+)", s)
+            if m and m.group(1) == "mcpu":
+                mcpu = m.group(2)
+            elif m and mattr is None:
+                mattr = m.group(2)
+        cmd = LLVM_MC + ["-triple=amdgcn--amdpal", f"-mcpu={mcpu}"]
+        if mattr:
+            cmd.append(f"-mattr={mattr}")
         cmd.append("-show-encoding")
         r = subprocess.run(cmd, input=asm, capture_output=True, text=True)
         assert r.returncode == 0, r.stderr
