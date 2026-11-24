@@ -1021,6 +1021,15 @@ struct DeviceState {
             backed.uint_backed = VK_FORMAT_A1R5G5B5_UNORM_PACK16;
             return backed;
         }
+        // A B4G4R4A4 render target where no 4444 format is a colour attachment (NVIDIA has none, sampled only): an
+        // RGBA8 image, which holds every 4-bit value exactly. RTVs and PSOs follow the image's format; the 4_4_4_4 T#s
+        // read it with the 4444 view's channels (bind_image). Not covered: a copy between it and a buffer footprint
+        // moves 4-byte RGBA8 texels, not packed 16-bit ones (replay's footprint bounds checks still hold).
+        if (desc.Format == DXGI_FORMAT_B4G4R4A4_UNORM && (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) &&
+            !color_attachment_usable(VK_FORMAT_A4R4G4B4_UNORM_PACK16) && color_attachment_usable(VK_FORMAT_R8G8B8A8_UNORM)) {
+            log_once("B4G4R4A4_UNORM render targets unavailable natively, using RGBA8; format", desc.Format);
+            return Format{VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT};
+        }
         // An 8-bit sRGB UAV texture where the sRGB format has no storage support: the host runtime makes it (RTX 4090
         // and WARP; a retail title sizes a 2048x2048 R8G8B8A8_UNORM_SRGB render target with unordered access), but no
         // typed UAV is sRGB in D3D12, so shaders write the raw bytes. A mutable image of the UNORM format of the same
@@ -1197,6 +1206,14 @@ struct DeviceState {
         VkFormat view_format =
             stencil ? image_format : g::vulkan_view_format(logical_format, image.format, allow_channel_cast);
         VkFormat channels_format = view_format;  // whose channels the T#'s swizzle selects from
+        // A B4G4R4A4 render target stored as RGBA8 (no 4444 format renders on this device): a 16-bit view of the
+        // 32-bit image is not allowed, so its 4_4_4_4 T# reads the RGBA8 image (which holds the logical R, G, B, A)
+        // with the channels of A4R4G4B4, the format the texture has (DXGI_FORMAT_B4G4R4A4_UNORM).
+        if (!stencil && image_format == VK_FORMAT_R8G8B8A8_UNORM &&
+            (view_format == VK_FORMAT_A4B4G4R4_UNORM_PACK16 || view_format == VK_FORMAT_A4R4G4B4_UNORM_PACK16)) {
+            view_format = VK_FORMAT_R8G8B8A8_UNORM;
+            channels_format = VK_FORMAT_A4R4G4B4_UNORM_PACK16;
+        }
         if (view_format == VK_FORMAT_UNDEFINED) {  // a 96-bit texture's T# names RGB32; its image is RGBA32
             view_format = rgb96_view_format(image_format, image.format);
             channels_format = rgb96_named_format(view_format);
@@ -3947,6 +3964,10 @@ public:
             graphics_.color_formats[i] = desc.RTVFormats[i] == DXGI_FORMAT_A8_UNORM && device_.info.a8_render_target
                                              ? VK_FORMAT_A8_UNORM_KHR
                                              : vulkan_format(desc.RTVFormats[i], false).format;
+            // B4G4R4A4 targets are RGBA8 images where no 4444 format renders (DeviceState's texture format choice).
+            if (graphics_.color_formats[i] == VK_FORMAT_A4R4G4B4_UNORM_PACK16 &&
+                !device_.color_attachment_usable(VK_FORMAT_A4R4G4B4_UNORM_PACK16))
+                graphics_.color_formats[i] = VK_FORMAT_R8G8B8A8_UNORM;
             if (graphics_.color_formats[i] == VK_FORMAT_UNDEFINED) {
                 log_once("render-target format not supported yet:", desc.RTVFormats[i]);
                 return E_INVALIDARG;
@@ -4908,6 +4929,10 @@ bool image_descriptor(const Resource& resource, const TextureView& view, leonida
     }
     const VkFormat resource_format = resource.uint_backed() ? resource.uint_backed() : resource.format();
     VkFormat named = resource_format;
+    // A B4G4R4A4 render target stored as an RGBA8 image (no 4444 colour attachment on the device): its T# names
+    // 4_4_4_4 as on the console, and bind_image views the RGBA8 image with the 4444 view's channels.
+    const bool rgba8_4444 = desc.Format == DXGI_FORMAT_B4G4R4A4_UNORM && resource.format() == VK_FORMAT_R8G8B8A8_UNORM;
+    if (rgba8_4444) named = VK_FORMAT_A4R4G4B4_UNORM_PACK16;
     if (volume) {
         const bool compatible = vulkan_format(desc.Format, false).typeless
             ? desc.Format == DXGI_FORMAT_R8G8B8A8_TYPELESS &&
@@ -4978,7 +5003,8 @@ bool image_descriptor(const Resource& resource, const TextureView& view, leonida
         }
         if (rgb96) named = rgb96_named_format(named);
     }
-    if (named == VK_FORMAT_UNDEFINED || !resource.allows_view_format(named)) {
+    if (named == VK_FORMAT_UNDEFINED ||
+        (rgba8_4444 ? named != VK_FORMAT_A4R4G4B4_UNORM_PACK16 : !resource.allows_view_format(named))) {
         log_once("view format not in the resource's castable list:", int(view.format));
         return false;
     }
@@ -4988,6 +5014,8 @@ bool image_descriptor(const Resource& resource, const TextureView& view, leonida
         view_format = resource.format();
     } else if (code && rgb96) {
         view_format = named;
+    } else if (code && rgba8_4444) {
+        view_format = resource.format();
     } else if (code) {
         view_format = g::vulkan_view_format(resource_format, code, resource.has_view_format_list());
     }
