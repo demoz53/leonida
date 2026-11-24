@@ -93,6 +93,19 @@ cmake --build runtime/build/linux --parallel
 
 On macOS, add `-DVulkan_INCLUDE_DIR=/opt/homebrew/include` to the first command.
 
+For a result you will post, add `-DLEONIDA_VULKAN_HEADERS_FETCH=ON` to the first command. It builds against the
+repository's pinned Khronos Vulkan-Headers (downloaded once at configure time and hash-checked;
+`-DFETCHCONTENT_SOURCE_DIR_VULKANHEADERS=<path>` uses a local copy instead), even when `VULKAN_SDK`,
+`Vulkan_INCLUDE_DIR` or installed headers name others, so two records of the same GPU compare. The headers decide
+what the test programs can ask the driver for: built against conda-forge's Vulkan 1.3 headers instead of the pin, a
+Radeon 780M skipped `ps_texoff`, `ps_texoff_forms` and `ps_texoff_implicit` (225/248 passed instead of 228/248,
+[#14](https://github.com/ubiquitarianism/leonida/issues/14#issuecomment-7122653687)). Every configure names the
+headers it uses in one line; quote it in the record:
+
+```text
+-- Vulkan headers: <build>/_deps/vulkanheaders-src/include (VK_HEADER_VERSION 363), the pin: Khronos Vulkan-Headers 6802bb4733b63ed5efd3adb308a6c885ef180ea1, hash-checked
+```
+
 The test programs and `scripts/run_gpu_tests.py` should come from the same commit. Some checks tolerate an older
 binary (`unpinned_subgroup_skip`), but mixing them can report false failures in the compute tests: 28 `cs_*`
 failures on both an RTX 5070 Ti Laptop and a Radeon 610M with the `426023a` script and `48ad23f` binaries, where

@@ -4,6 +4,12 @@ This page keeps a local record of GPU test runs. The project's public tracker is
 [#166](https://github.com/ItsNotRexed/Leonida/issues/166) (one comment per GPU and driver);
 post counts and pass/fail lines there, never game shaders, logs or private paths.
 
+Name the Vulkan headers a run was built against: configure with `-DLEONIDA_VULKAN_HEADERS_FETCH=ON`, which uses the
+repository's pinned Khronos Vulkan-Headers whatever else is installed, and quote the configure's `-- Vulkan headers:`
+line in the entry. Other headers can change the counts ([testing.md](testing.md#build-the-test-programs)). Until
+`CMAKE-VULKAN-HEADERS-PIN` the flag lost to any Vulkan headers already on the machine, so an older entry whose setup
+names it may have been built against those instead.
+
 | GPU | Driver, OS | Commit | build.py | check.py | run_gpu_tests.py | Failed | Entry |
 |---|---|---|---|---|---|---|---|
 | AMD Radeon RX 9070 GRE (RDNA4, GFX1201), subgroup 32..64 | RADV, Mesa 26.3.1-arch3.5, Vulkan 1.4.363, CachyOS | `05961f0` | 264/264 translated and valid | 203/206 pass, 3 skipped | 218/235 passed, 16 skipped (native and emulated) | `ms_wave_info_s3`, flaky (see below) | [local note](../gpu-test-results/RX9070GRE.txt) |
