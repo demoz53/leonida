@@ -809,7 +809,7 @@ struct SignatureElement {
 
 // Compare the same ISG1 fields shader_meta.py recorded. Names in the chunk are offsets from its beginning.
 inline bool matches_isg1(const std::vector<SignatureElement>& inputs, std::span<const std::uint8_t> chunk) {
-    if (chunk.size() < 8 || inputs.empty()) return false;
+    if (chunk.size() < 8) return false;
     const auto u32 = [&](std::size_t offset) {
         std::uint32_t value;
         std::memcpy(&value, chunk.data() + offset, sizeof(value));
@@ -858,7 +858,8 @@ struct ShaderEntry {
     // subgroup size. Empty for a native translation.
     std::string wave64_exchange;
     bool emulated() const { return wave64_exchange == "workgroup"; }
-    std::vector<SignatureElement> input_signature;  // vertex shaders: what the input layout must feed
+    bool has_input_signature = false;  // an empty ISG1 is distinct from an index without signature metadata
+    std::vector<SignatureElement> input_signature;  // VS vertex inputs and PS fragment inputs
     std::vector<std::uint32_t> inputs;              // pixel shaders: input locations declared
     std::vector<std::uint32_t> outputs;             // pixel/vertex shaders: output locations written
     // --f16-interp-fallback: param/attr index -> {low_half_location, high_half_location} (SHADER-378).
@@ -937,18 +938,18 @@ public:
         return all.empty() ? nullptr : all.front();
     }
 
-    // For a vertex program shared by several containers, use the signature from the PSO's bytecode when
+    // For a vertex or pixel program shared by several containers, use the signature from the PSO's bytecode when
     // the index records a match. Keep the order among matching entries for the normal binding preference.
     std::vector<const ShaderEntry*> candidates(std::string_view stage, std::string_view fssm_sha256,
                                                std::span<const std::uint8_t> bytecode = {}) const {
         auto all = lookup(entries_, stage, fssm_sha256);
-        if (stage != "vs" || all.size() < 2 || bytecode.empty()) return all;
+        if ((stage != "vs" && stage != "ps") || all.size() < 2 || bytecode.empty()) return all;
         const auto signature = dxbc_part(bytecode, "ISG1");
         if (signature.empty()) return all;
         std::vector<const ShaderEntry*> matches;
         for (const auto* entry : all)
-            if (matches_isg1(entry->input_signature, signature)) matches.push_back(entry);
-        // An index without a complete matching signature still goes through the layout-based selection.
+            if (entry->has_input_signature && matches_isg1(entry->input_signature, signature)) matches.push_back(entry);
+        // Older indexes can omit the signature. Preserve the existing candidate order when none matches.
         if (matches.empty()) return all;
         return matches;
     }
@@ -1076,6 +1077,7 @@ private:
             if (const Json* x = meta.find("wave64_exchange"); x && x->kind == Json::Kind::string)
                 e.wave64_exchange = x->string;
             if (const Json* s = meta.find("input_signature"); s && s->kind == Json::Kind::array) {
+                e.has_input_signature = true;
                 for (const Json& item : s->array) {
                     SignatureElement element;
                     if (const Json* v = item.find("semantic"); v && v->kind == Json::Kind::string) element.semantic = v->string;

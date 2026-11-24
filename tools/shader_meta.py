@@ -668,7 +668,7 @@ def read_dxbc_meta(data):
                         "system_value": sysv,
                         "component_type": COMPONENT_TYPES.get(ctype, str(ctype)),
                     })
-                if elems and len(elems) == ecnt:
+                if len(elems) == ecnt:
                     out["input_signature"] = elems
 
     if b"SFI0" in parts and len(parts[b"SFI0"]) >= 8:

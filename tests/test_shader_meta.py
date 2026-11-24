@@ -167,6 +167,11 @@ class DxbcMetaTests(unittest.TestCase):
                 self.assertNotIn("input_signature", meta)
                 self.assertTrue(meta["sfi0_resource_heap_directly_indexed"])
 
+    def test_empty_signature_is_distinct_from_missing_or_partial_metadata(self):
+        self.assertEqual(M.read_dxbc_meta(make_dxbc([isg1_chunk([])])), {"input_signature": []})
+        self.assertNotIn("input_signature", M.read_dxbc_meta(make_dxbc([])))
+        self.assertNotIn("input_signature", M.read_dxbc_meta(make_dxbc([(b"ISG1", struct.pack("<II", 1, 8))])))
+
     def test_sfi0_both_heaps_and_empty_dxbc(self):
         dxbc = make_dxbc([sfi0_chunk(M.SFI0_RESOURCE_DESCRIPTOR_HEAP_INDEXING | M.SFI0_SAMPLER_DESCRIPTOR_HEAP_INDEXING)])
         got = M.read_dxbc_meta(dxbc)

@@ -2049,6 +2049,12 @@ recorded input signature matches the chunk, including the registers, component t
 layout and binding preferences still apply within that group. Bare programs and older indexes with incomplete
 signatures retain the layout-based lookup.
 
+Pixel shaders also use ISG1 to distinguish translations of a shared program. For example, the
+`SV_Position` read mask determines which component occupies the first position input register. A pixel shader
+reading v2 can thus translate to a fragment depth read in one container and a reciprocal-W read in another.
+The translator records `input_signature: []` for a valid signature with zero rows. A missing signature field
+in an older index leaves the signature unknown.
+
 Pipeline creation:
 
 - `D3D12_GRAPHICS_PIPELINE_STATE_DESC` is supported today (`CreateGraphicsPipelineState`), as is the compute desc. The

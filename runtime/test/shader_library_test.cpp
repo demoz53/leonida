@@ -683,16 +683,20 @@ int main() {
         std::filesystem::create_directory(subdir);
         std::ofstream index(subdir / "index.json");
         index << "{";
-        auto add = [&](const char* name, int reg, int mask, bool last = false) {
-            index << "\"" << name << "\":{\"stage\":\"vs\",\"fssm_sha256\":\"" << hash
+        auto add = [&](const char* stage, const char* name, int reg, int mask, int read_mask) {
+            index << "\"" << name << "\":{\"stage\":\"" << stage << "\",\"fssm_sha256\":\"" << hash
                   << "\",\"input_signature\":[{\"semantic\":\"COLOR\",\"semantic_index\":0,\"system_value\":0,"
                      "\"component_type\":\"float\",\"register\":" << reg << ",\"mask\":" << mask
-                  << ",\"rw_mask\":1}]}" << (last ? "}" : ",");
+                  << ",\"rw_mask\":" << read_mask << "}]},";
         };
-        add("other_register", 0, 3);
-        add("other_mask", 1, 15);
-        add("matching_a", 1, 3);
-        add("matching_b", 1, 3, true);
+        add("vs", "other_register", 0, 3, 1);
+        add("vs", "other_mask", 1, 15, 1);
+        add("vs", "matching_a", 1, 3, 1);
+        add("vs", "matching_b", 1, 3, 1);
+        add("ps", "reads_y", 1, 3, 2);
+        add("ps", "reads_x", 1, 3, 1);
+        index << "\"legacy\":{\"stage\":\"ps\",\"fssm_sha256\":\"" << hash << "\"},"
+              << "\"no_inputs\":{\"stage\":\"ps\",\"fssm_sha256\":\"" << hash << "\",\"input_signature\":[]}}";
         index.close();
         ShaderLibrary aliases;
         CHECK(aliases.load(subdir));
@@ -719,6 +723,13 @@ int main() {
         CHECK(program_hash == hash);
         const auto exact = aliases.candidates("vs", program_hash, wrapped);
         CHECK(exact.size() == 2 && exact[0]->name == "matching_a" && exact[1]->name == "matching_b");
+        const auto pixel = aliases.candidates("ps", program_hash, wrapped);
+        CHECK(pixel.size() == 1 && pixel[0]->name == "reads_x");
+        auto no_inputs = wrapped;
+        no_inputs[row - 8] = 0;  // ISG1 header declares zero rows
+        const auto empty_sig = aliases.candidates("ps", program_hash, no_inputs);
+        CHECK(empty_sig.size() == 1 && empty_sig[0]->name == "no_inputs");
+        CHECK(aliases.candidates("ps", program_hash, shader).size() == 4);  // no ISG1
         const auto fallback = aliases.candidates("vs", hash);
         CHECK(fallback.size() == 4 && fallback[0]->name == "other_register");
         CHECK(aliases.candidates("vs", hash, shader) == fallback);  // DXIL without ISG1
