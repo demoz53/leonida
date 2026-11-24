@@ -347,6 +347,10 @@ def verify_manifest(
         raise ManifestError(f"target path is not a directory: {target_dir}")
 
     want = load_manifest(manifest_path)
+    if cache_path is not None:
+        for rel in want:
+            if same_report_path(cache_path, os.path.join(target_dir, rel)):
+                raise ManifestError(f"cache must not overwrite a listed input: {rel}")
     have = dict(walk(target_dir, exclude=manifest_path if cache_path is None else (manifest_path, cache_path)))
     if not want and have:
         # A cut-short create or a mistyped --manifest would otherwise print OK without checking a file.

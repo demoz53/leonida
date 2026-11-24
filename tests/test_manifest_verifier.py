@@ -1006,6 +1006,61 @@ class TestVerifyCache(unittest.TestCase):
                 report = self.verify()
                 self.assertEqual((report.passed, report.cached), (True, 0))
 
+    def assert_input_cache_refused(self) -> None:
+        with patch.object(mv, "sha256_file", wraps=mv.sha256_file) as hashing:
+            with self.assertRaisesRegex(mv.ManifestError, "cache must not overwrite a listed input"):
+                self.verify()
+            hashing.assert_not_called()
+        for rel, data in self.data.items():
+            with open(os.path.join(self.game, rel), "rb") as f:
+                self.assertEqual(f.read(), data)
+
+    def test_cache_refuses_normalized_input_path(self) -> None:
+        self.cache = os.path.join(self.game, "..", "game", "a.bin")
+        self.assert_input_cache_refused()
+
+    def test_cache_refuses_input_case_alias_on_folding_volume(self) -> None:
+        self.cache = os.path.join(self.game, "A.BIN")
+        if not os.path.exists(self.cache):
+            self.skipTest("volume is case-sensitive")
+        self.assert_input_cache_refused()
+
+    def test_cache_refuses_input_hard_link(self) -> None:
+        try:
+            os.link(os.path.join(self.game, "a.bin"), self.cache)
+        except OSError as err:
+            self.skipTest(f"hard links unavailable: {err}")
+        self.assert_input_cache_refused()
+
+    def test_cache_refuses_input_symlink(self) -> None:
+        try:
+            os.symlink(os.path.join(self.game, "a.bin"), self.cache)
+        except OSError as err:
+            self.skipTest(f"symlinks unavailable: {err}")
+        self.assert_input_cache_refused()
+
+    def test_cache_does_not_create_a_missing_listed_input(self) -> None:
+        self.cache = os.path.join(self.game, "a.bin")
+        os.unlink(self.cache)
+        with self.assertRaisesRegex(mv.ManifestError, "cache must not overwrite a listed input"):
+            self.verify()
+        self.assertFalse(os.path.exists(self.cache))
+
+    def test_cli_cache_equal_to_input_preserves_data(self) -> None:
+        self.cache = os.path.join(self.game, "a.bin")
+        result = subprocess.run(
+            [sys.executable, "-I", TOOL, self.game, "--manifest", self.manifest,
+             "--cache", self.cache, "--json"],
+            capture_output=True, text=True, timeout=15,
+        )
+        for rel, data in self.data.items():
+            with open(os.path.join(self.game, rel), "rb") as f:
+                self.assertEqual(f.read(), data)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cache must not overwrite a listed input", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(result.stdout, "")
+
     def test_cache_inside_target_and_strict(self) -> None:
         self.cache = os.path.join(self.game, "cache.json")
         for _ in range(2):  # cold and warm
