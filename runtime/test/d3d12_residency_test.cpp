@@ -5,9 +5,11 @@
 // few others, residency flags, a null fence, and the fence values EnqueueMakeResident signals (the value the fence
 // reaches is recorded too). Every HRESULT is recorded and the two records must be the same, step by step. A step the
 // host runtime faults on is reported and not compared. No shaders or game data. Skips (77) without a Vulkan GPU;
-// without a host D3D12 device only the layer's own record is printed. Set LEONIDA_D3D49_VERBOSE=1 to print every
+// without a host D3D12 device only the layer's own record is printed, and so it is under Wine, whose host is vkd3d
+// (host_wine.h: it answers S_OK to calls Microsoft's runtime refuses). Set LEONIDA_D3D49_VERBOSE=1 to print every
 // step.
 #include "vk_test_device.h"
+#include "host_wine.h"
 #include "../shims/d3d12_com.h"
 
 #include <cstdint>
@@ -371,7 +373,7 @@ int main(int argc, char** argv) {
         EXPECT(run(device.p, false, ours));
 
         Ref<ID3D12Device> host;
-        host.p = create_host();
+        host.p = hostwine::host_is_wine() ? nullptr : create_host();
         if (!host.p) {
             std::printf("residency: no host D3D12 device to compare with; %zu steps recorded, not compared\n",
                         ours.values.size());

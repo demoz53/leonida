@@ -6,10 +6,12 @@
 // with whether the call wrote its outputs (they start as a sentinel), and the two records must be the same. A
 // resource one device refuses to create is reported and its steps aren't compared. No shaders or game data. Skips
 // (77) without a Vulkan GPU or the standalone device; without a host D3D12 device only the layer's own record is
-// printed. The host runs on the layer's adapter (host_adapter.h; LEONIDA_HOST_ADAPTER picks another, "warp" WARP).
+// printed, and so it is under Wine, whose host is vkd3d and reports other heap flags (host_wine.h). The host runs on
+// the layer's adapter (host_adapter.h; LEONIDA_HOST_ADAPTER picks another, "warp" WARP).
 // Set LEONIDA_D3D49_VERBOSE=1 to print every value.
 #include "../shims/d3d12_com.h"
 #include "host_adapter.h"
+#include "host_wine.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -251,7 +253,7 @@ int main() {
     // No factory, or no adapter for the pass (LEONIDA_HOST_ADAPTER=warp without WARP): don't compare, rather than
     // fall back to the default adapter and compare with a GPU the layer doesn't run on.
     const bool have_adapter =
-        SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory.p))) &&
+        !hostwine::host_is_wine() && SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory.p))) &&
         hostadapter::reference(factory.p, &luid, hostadapter::wanted() == "warp", &adapter.p, host_name);
     Ref<ID3D12Device> host;
     if (!have_adapter) {

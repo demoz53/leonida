@@ -1,8 +1,10 @@
 // Typeless depth-stencil textures without ALLOW_DEPTH_STENCIL (R24G8_TYPELESS, R32G8X24_TYPELESS), as an application
 // makes to keep a copy of its depth buffer for sampling: clear a depth buffer of the family, CopyResource it into
 // the plain texture, read both planes back and compare with Windows D3D12/WARP. No game data or shaders.
+// Skipped (77) under Wine, where the reference would be vkd3d (host_wine.h): it reads both planes back as zeros.
 // LEONIDA_VK_VALIDATION=1 checks Vulkan usage.
 #include "vk_test_device.h"
+#include "host_wine.h"
 #include "../shims/d3d12_com.h"
 #include <dxgi1_4.h>
 #include <algorithm>
@@ -169,6 +171,7 @@ int main() {
     const auto device_status = vk.initialize();
     if (device_status == vktest::DeviceStatus::unavailable) return 77;
     if (device_status != vktest::DeviceStatus::ready) return 1;
+    if (hostwine::host_is_wine()) return 77;  // every case is compared with the host
     unsigned failures = 0;
     {
         Ref<ID3D12Device> ours;
