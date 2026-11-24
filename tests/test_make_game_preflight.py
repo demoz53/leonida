@@ -348,6 +348,19 @@ class ToolchainDetectionTest(PreflightTestBase):
         self.assertFalse(make_game.tool_available("   "))
         self.assertFalse(make_game.tool_available('""'))
 
+    def test_tool_available_quoted_path_with_spaces_and_arguments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = os.path.join(tmp, "my tools", "tool.exe")
+            os.makedirs(os.path.dirname(exe))
+            with open(exe, "wb"):
+                pass
+            self.assertTrue(make_game.tool_available(exe))
+            self.assertTrue(make_game.tool_available(f'"{exe}"'))
+            self.assertTrue(make_game.tool_available(f'"{exe}" --version'))
+
+    def test_tool_available_unmatched_quote_returns_false(self):
+        self.assertFalse(make_game.tool_available('"unclosed path'))
+
     APPDATA_ENV = {"LOCALAPPDATA": r"C:\Users\u\AppData\Local", "APPDATA": r"C:\Users\u\AppData\Roaming"}
 
     def test_appdata_hint_names_the_folder_llvm_mc_is_in(self):
