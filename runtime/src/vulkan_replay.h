@@ -1870,27 +1870,48 @@ inline ReplayResult prepare_texture_copy(const CopyTexture& copy, Prepared& p) {
     return ReplayResult::success;
 }
 
-// RGBA8 CopyTiles accepts arbitrary byte offsets into its linear buffer, while VkBufferImageCopy requires texel
-// alignment. Stage only the occupied texels through aligned transfer scratch; leave partial-tile padding alone.
-inline bool stage_unaligned_tile(const ReplayFunctions& vk, Prepared& p, bool upload) {
+// CopyTiles accepts arbitrary byte offsets into its linear buffer, while VkBufferImageCopy requires texel/block
+// alignment (VUID-vkCmdCopyBufferToImage-dstImage-07975). Stage only the occupied texels/blocks through aligned
+// transfer scratch; leave partial-tile padding alone.
+inline bool stage_unaligned_tile(const ReplayFunctions& vk, Prepared& p, const ResourceBinding& image,
+                                 const BlockFormat& fmt, bool upload) {
     auto& region = p.buffer_image_copies.front();
-    const VkDeviceSize row_bytes = VkDeviceSize(region.imageExtent.width) * 4;
-    const VkDeviceSize pitch = VkDeviceSize(region.bufferRowLength) * 4;
-    const auto rows = region.imageExtent.height;
+    if (!fmt.bytes || !fmt.block || image.rgb96 ||
+        (image.depth24_as_float && region.imageSubresource.aspectMask == VK_IMAGE_ASPECT_DEPTH_BIT))
+        return false;
+    const VkDeviceSize blocks_w = (VkDeviceSize(region.imageExtent.width) + fmt.block - 1) / fmt.block;
+    const VkDeviceSize rows = (VkDeviceSize(region.imageExtent.height) + fmt.block - 1) / fmt.block;
+    const VkDeviceSize depth = region.imageExtent.depth;
+    const VkDeviceSize row_bytes = blocks_w * fmt.bytes;
+    const VkDeviceSize pitch =
+        region.bufferRowLength ? VkDeviceSize(region.bufferRowLength / fmt.block) * fmt.bytes : row_bytes;
+    const VkDeviceSize slice_rows =
+        region.bufferImageHeight ? VkDeviceSize(region.bufferImageHeight / fmt.block) : rows;
+    const VkDeviceSize slice_pitch = slice_rows * pitch;
+    const VkDeviceSize slice_bytes = row_bytes * rows;
+    const VkDeviceSize total_bytes = slice_bytes * depth;
     VkDeviceSize scratch_offset = 0;
-    if (!vk.copy_scratch || !vk.copy_scratch(row_bytes * rows, p.tile_scratch, scratch_offset)) return false;
+    if (!total_bytes || !vk.copy_scratch || !vk.copy_scratch(total_bytes, p.tile_scratch, scratch_offset)) return false;
     const auto app_offset = region.bufferOffset;
     const auto add_copy = [&](VkDeviceSize linear, VkDeviceSize scratch, VkDeviceSize bytes) {
         p.tile_rows.push_back(upload ? VkBufferCopy{linear, scratch, bytes} : VkBufferCopy{scratch, linear, bytes});
     };
-    if (row_bytes == pitch) {
-        add_copy(app_offset, scratch_offset, row_bytes * rows);
+    if (row_bytes == pitch && (depth == 1 || slice_rows == rows)) {
+        add_copy(app_offset, scratch_offset, total_bytes);
+    } else if (row_bytes == pitch) {
+        for (VkDeviceSize z = 0; z < depth; ++z)
+            add_copy(app_offset + z * slice_pitch, scratch_offset + z * slice_bytes, slice_bytes);
     } else {
-        for (std::uint32_t row = 0; row < rows; ++row)
-            add_copy(app_offset + row * pitch, scratch_offset + row * row_bytes, row_bytes);
+        for (VkDeviceSize z = 0; z < depth; ++z) {
+            const VkDeviceSize linear_slice = app_offset + z * slice_pitch;
+            const VkDeviceSize scratch_slice = scratch_offset + z * slice_bytes;
+            for (VkDeviceSize row = 0; row < rows; ++row)
+                add_copy(linear_slice + row * pitch, scratch_slice + row * row_bytes, row_bytes);
+        }
     }
     region.bufferOffset = scratch_offset;
     region.bufferRowLength = 0;
+    region.bufferImageHeight = 0;
     return true;
 }
 
@@ -2786,9 +2807,15 @@ ReplayResult prepare(const CommandList& list, Resolve&& resolve, const ReplayFun
                 // A depth plane footprint of a D24 texture stored as D32: words of 24-bit UNORM, floats in the image.
                 const bool upload = texture_copy->src.footprint;
                 const ResourceBinding& image = upload ? p.binding : p.source;
-                if (result == ReplayResult::success && texture_copy->tile_footprint && !p.buffer_image_copies.empty() &&
-                    p.buffer_image_copies.front().bufferOffset % 4 && !detail::stage_unaligned_tile(vk, p, upload))
-                    return ReplayResult::unsupported;
+                if (result == ReplayResult::success && texture_copy->tile_footprint && !p.buffer_image_copies.empty()) {
+                    const auto& region = p.buffer_image_copies.front();
+                    const BlockFormat fmt = copy_block_format(image, region.imageSubresource.aspectMask);
+                    const std::uint32_t alignment =
+                        (region.imageSubresource.aspectMask & depth_stencil_aspects) || image.rgb96 ? 4 : fmt.bytes;
+                    if (alignment > 1 && region.bufferOffset % alignment &&
+                        !detail::stage_unaligned_tile(vk, p, image, fmt, upload))
+                        return ReplayResult::unsupported;
+                }
                 const bool depth24_footprint = result == ReplayResult::success && image.depth24_as_float &&
                     !p.buffer_image_copies.empty() &&
                     p.buffer_image_copies[0].imageSubresource.aspectMask == VK_IMAGE_ASPECT_DEPTH_BIT;
