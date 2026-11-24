@@ -2245,6 +2245,9 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
             if (!vk.buffer_at(draw.index.va, size, p.index_buffer, p.index_offset))
                 return ReplayResult::unresolved_resource;
         }
+        // VUID-vkCmdBindIndexBuffer-offset-08783: offset must be a multiple of the index type's size (2 or 4 bytes).
+        const VkDeviceSize index_align = p.index_type == VK_INDEX_TYPE_UINT32 ? 4 : 2;
+        if (p.index_offset % index_align) return ReplayResult::invalid_draw;
     }
     return ReplayResult::success;
 }
