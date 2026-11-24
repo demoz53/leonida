@@ -272,7 +272,13 @@ int main() {
         D3D12_DEPTH_STENCIL_DESC1 bounds{};
         bounds.DepthBoundsTestEnable = TRUE;
         bad.add(DepthStencil1Subobject{.inner = bounds});
-        if (vk.enabled.depthBounds) {
+        // The device reports VkPhysicalDeviceFeatures::depthBounds as OPTIONS2::DepthBoundsTestSupported
+        // (d3d12_depth_bounds_test checks the two agree).
+        D3D12_FEATURE_DATA_D3D12_OPTIONS2 options2{};
+        const bool depth_bounds =
+            SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS2, &options2, sizeof(options2))) &&
+            options2.DepthBoundsTestSupported;
+        if (depth_bounds) {
             Ref<ID3D12PipelineState> bounds_pso;
             EXPECT(SUCCEEDED(create(device.p, bad, bounds_pso)) && bounds_pso.p);
         } else {
