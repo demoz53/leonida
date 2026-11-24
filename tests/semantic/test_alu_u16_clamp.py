@@ -108,6 +108,28 @@ class U16ClampTests(unittest.TestCase):
             with self.subTest(op=op, clamp=clamp, x=hex(x), y=hex(y)):
                 self.assertEqual(run_op(op, x, y, clamp), ref(op, x, y, clamp, OLD))
 
+    def test_int16_clamp_noop(self):
+        """VOP3 clamp is a hardware no-op on scalar 16-bit mul_lo/max/min/shifts (measured on gfx1036)."""
+        cases = [
+            # (op, x, y, expected_lo16)
+            ("v_mul_lo_u16_e64", 0xFFFF, 0xFFFF, 0x0001),       # wraps mod 2^16, does NOT saturate to 0xFFFF
+            ("v_mul_lo_u16_e64", 0x1234, 0x5678, (0x1234 * 0x5678) & 0xFFFF),
+            ("v_max_u16_e64", 0xFFFF, 0x0001, 0xFFFF),
+            ("v_min_u16_e64", 0xFFFF, 0x0001, 0x0001),
+            ("v_max_i16_e64", 0x8000, 0x7FFF, 0x7FFF),
+            ("v_min_i16_e64", 0x8000, 0x7FFF, 0x8000),
+            ("v_lshlrev_b16_e64", 4, 0xFFFF, 0xFFF0),           # shifts out high bits, does NOT saturate
+            ("v_lshrrev_b16_e64", 4, 0x8001, 0x0800),
+            ("v_ashrrev_i16_e64", 4, 0x8001, 0xF800),
+        ]
+        for op, x, y, exp_lo in cases:
+            with self.subTest(op=op, x=hex(x), y=hex(y)):
+                got_plain = run_op(op, x, y, False)
+                got_clamp = run_op(op, x, y, True)
+                expected = (OLD & 0xFFFF0000) | exp_lo
+                self.assertEqual(got_plain, expected)
+                self.assertEqual(got_clamp, expected)
+
 
 if __name__ == "__main__":
     unittest.main()

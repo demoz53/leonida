@@ -9186,20 +9186,22 @@ class Gen:
                 else:
                     self.emit(f"{r} = OpExtInst %uint %glsl {'UMax' if 'max' in op else 'UMin'} {x} {y}")
             if "clamp" in mods:
-                # VOP3 clamp saturates the unsigned add/sub to [0, 0xFFFF], as for the 32-bit ops (docs/design.md,
-                # "Integer clamp"). The operands are zero-extended, so a result past 0xFFFF is an overflow (add) or a
-                # borrow (sub). Other 16-bit ops: rejected rather than guessed.
+                # VOP3 clamp saturates v_add/v_sub_{u16,i16} to [0, 0xFFFF] / [-32768, 32767] (docs/design.md,
+                # "Integer clamp"). On v_mul_lo_u16, v_max/v_min_{u16,i16}, and the 16-bit shifts
+                # (v_lshlrev_b16, v_lshrrev_b16, v_ashrrev_i16), VOP3 clamp is a hardware no-op (measured
+                # natively on AMD gfx1036; v_mul_lo_u16 wraps modulo 2^16).
                 if op in ("v_add_i16", "v_sub_i16"):
                     sat = self.tmp()
                     self.emit(f"{sat} = OpExtInst %uint %glsl SClamp {r} {self.cu(0xFFFF8000)} {self.cu(0x7FFF)}")
                     r = sat
-                elif op not in ("v_add_u16", "v_sub_u16"):
-                    raise Unsupported(op + " clamp")
-                if op in ("v_add_u16", "v_sub_u16"):
+                elif op in ("v_add_u16", "v_sub_u16"):
                     ov, sat = self.tmp(), self.tmp()
                     self.emit(f"{ov} = OpUGreaterThan %bool {r} {self.cu(0xFFFF)}")
                     self.emit(f"{sat} = OpSelect %uint {ov} {self.cu(0 if 'sub' in op else 0xFFFF)} {r}")
                     r = sat
+                elif op not in ("v_mul_lo_u16", "v_max_u16", "v_min_u16", "v_max_i16", "v_min_i16",
+                                "v_lshlrev_b16", "v_lshrrev_b16", "v_ashrrev_i16"):
+                    raise Unsupported(op + " clamp")
             lo = self.tmp()
             self.emit(f"{lo} = OpBitwiseAnd %uint {r} {self.cu(0xFFFF)}")
             if e64 and sb[2]:
