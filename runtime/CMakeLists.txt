@@ -113,6 +113,7 @@ if(WIN32 AND LEONIDA_BUILD_WINDOWS_RUNTIME)
     shims/registry.cpp
     shims/file_system.cpp
     shims/winhttp_offline.cpp
+    shims/mfplat_offline.cpp
     shims/xmem.cpp
     shims/xg_xs.cpp
     shims/acphal.cpp
@@ -325,6 +326,19 @@ if(WIN32 AND LEONIDA_BUILD_WINDOWS_RUNTIME)
   target_compile_definitions(winhttp_offline_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_compile_options(winhttp_offline_test PRIVATE /W4 /permissive- /utf-8)
   target_link_options(winhttp_offline_test PRIVATE /OPT:NOREF)
+
+  # Offline Media Foundation source resolver proxy (mfplat.dll); blocks network URLs and rewrites console drives.
+  add_executable(mfplat_offline_test
+    test/mfplat_offline_test.cpp
+    shims/mfplat_offline.cpp
+    shims/file_system.cpp
+    shims/registry.cpp
+  )
+  target_include_directories(mfplat_offline_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shims)
+  target_compile_definitions(mfplat_offline_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_compile_options(mfplat_offline_test PRIVATE /W4 /permissive- /utf-8)
+  target_link_options(mfplat_offline_test PRIVATE /OPT:NOREF)
+  target_link_libraries(mfplat_offline_test PRIVATE advapi32)
 
   # COM lifecycle and helper shims for api-ms-win-core-com-l1-1-*.dll.
   add_executable(com_shim_test
@@ -1180,6 +1194,9 @@ if(BUILD_TESTING)
   endif()
   if(WIN32 AND TARGET winhttp_offline_test)
     add_test(NAME winhttp_offline COMMAND winhttp_offline_test)
+  endif()
+  if(WIN32 AND TARGET mfplat_offline_test)
+    add_test(NAME mfplat_offline COMMAND mfplat_offline_test)
   endif()
   if(WIN32 AND TARGET com_shim_test)
     add_test(NAME com_shim COMMAND com_shim_test)

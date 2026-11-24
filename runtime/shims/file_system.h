@@ -16,7 +16,9 @@
 // CopyFile*/CopyFileEx*/CopyFile2 and SetFileAttributes* (the rules for each are in docs/runtime_imports.md).
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
+#include <string>
 
 namespace rt::fs {
 
@@ -28,6 +30,11 @@ void configure(const std::filesystem::path& game_dir, const std::filesystem::pat
 
 std::filesystem::path game_dir();
 std::filesystem::path overlay_dir();
+
+// Resolves a console path (GAME:, G:, T:) for read access using the same overlay, package, and deletion-marker rules
+// as CreateFileW, or returns a host path unchanged. Returns false and writes the Win32 error code when the path is
+// refused (e.g. traversal outside the console root or a deleted package file).
+bool resolve_read_path(const std::wstring& path, std::wstring& out, std::uint32_t* error = nullptr);
 
 // For tests: true makes the CopyFile2 shim use its CopyFileExW fallback even where the host has CopyFile2, so the
 // path Wine 9 takes can be checked on Windows. Off by default; main.cpp never sets it.

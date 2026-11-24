@@ -1393,6 +1393,18 @@ BOOL WINAPI set_file_attributes_a(LPCSTR name, DWORD attributes) {
     return set_file_attributes_w(wide.c_str(), attributes);
 }
 
+bool resolve_read_path(const std::wstring& path, std::wstring& out, std::uint32_t* error) {
+    const Target t = read_target(path);
+    if (t.error != 0) {
+        if (error) *error = static_cast<std::uint32_t>(t.error);
+        out.clear();
+        return false;
+    }
+    if (error) *error = 0;
+    out = t.path.native();
+    return true;
+}
+
 }  // namespace rt::fs
 
 namespace {
