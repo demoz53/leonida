@@ -347,10 +347,11 @@ def run_lines(lines, sdst: str = "s[10:11]") -> tuple:
     return sum((x & 0xFFFF) << (16 * i) for i, x in enumerate(w)), flag & 1
 
 
-def run_op(op: str, x: int, y: int, z: int) -> tuple:
+def run_op(op: str, x: int, y: int, z: int, clamp: bool = False) -> tuple:
+    suffix = " clamp" if clamp else ""
     return run_lines([f"v_mov_b32 v2, {x:#x}", f"v_mov_b32 v3, {y:#x}", f"v_mov_b32 v12, {z & M32:#x}",
                       f"v_mov_b32 v13, {z >> 32:#x}", "s_mov_b32 s10, 0", "s_mov_b32 s11, 0",
-                      f"{op} v[0:1], s[10:11], v2, v3, v[12:13]"])
+                      f"{op} v[0:1], s[10:11], v2, v3, v[12:13]{suffix}"])
 
 
 class MadU64ReferenceOracleTests(unittest.TestCase):
@@ -828,6 +829,47 @@ class Mad64Tests(unittest.TestCase):
                          "v_add_co_ci_u32 v1, vcc_lo, v14, 0, vcc_lo", "v_mov_b32 v0, 0", "s_mov_b32 s10, 0",
                          "s_mov_b32 s11, 0"])
         self.assertEqual(got[0] >> 32, 42)
+
+    def test_clamp_saturation_preserves_sdst(self):
+        # VOP3 clamp saturates D to UINT64_MAX (u64) or [INT64_MIN, INT64_MAX] (i64)
+        # while sdst still reports the real carry/sign bit 64.
+        def ref_clamp(op: str, x: int, y: int, z: int) -> tuple[int, int]:
+            if op == "v_mad_u64_u32":
+                exact = (x & M32) * (y & M32) + (z & M64)
+                return (min(exact, M64), (exact >> 64) & 1)
+            exact = s32(x) * s32(y) + s64(z)
+            clamped = min(max(exact, -(1 << 63)), (1 << 63) - 1) & M64
+            return (clamped, 1 if exact < 0 else 0)
+
+        cases = [
+            # Unsigned overflow -> UINT64_MAX, carry=1
+            ("v_mad_u64_u32", M32, M32, M64),
+            ("v_mad_u64_u32", 1, 1, M64),
+            # Unsigned exact boundary (no overflow) -> UINT64_MAX, carry=0
+            ("v_mad_u64_u32", 1, 1, M64 - 1),
+            ("v_mad_u64_u32", M32, M32, 0),
+            # Signed positive overflow -> INT64_MAX, sign=0
+            ("v_mad_i64_i32", 0x7FFFFFFF, 0x7FFFFFFF, (1 << 63) - 1),
+            ("v_mad_i64_i32", 0x80000000, 0x80000000, (1 << 63) - 1),
+            ("v_mad_i64_i32", 1, 1, (1 << 63) - 1),
+            # Signed negative overflow -> INT64_MIN, sign=1
+            ("v_mad_i64_i32", 0x80000000, 0x7FFFFFFF, 1 << 63),
+            ("v_mad_i64_i32", 0xFFFFFFFF, 1, 1 << 63),
+            # Signed in-range extremes (no overflow)
+            ("v_mad_i64_i32", 0, 0, 1 << 63),
+            ("v_mad_i64_i32", 0, 0, (1 << 63) - 1),
+            ("v_mad_i64_i32", 0x80000000, 0x80000000, 1 << 63),  # +2^62 + (-2^63) = -2^62 (fits!)
+        ]
+        for op, x, y, z in cases:
+            with self.subTest(op=op, x=hex(x), y=hex(y), z=hex(z)):
+                self.assertEqual(run_op(op, x, y, z, clamp=True), ref_clamp(op, x, y, z))
+
+        rng = random.Random(0x64C1)
+        for _ in range(30):
+            op = rng.choice(["v_mad_u64_u32", "v_mad_i64_i32"])
+            x, y, z = rng.getrandbits(32), rng.getrandbits(32), rng.getrandbits(64)
+            with self.subTest(op=op, x=hex(x), y=hex(y), z=hex(z)):
+                self.assertEqual(run_op(op, x, y, z, clamp=True), ref_clamp(op, x, y, z))
 
 
 class Mad64WaveMaskTests(unittest.TestCase):

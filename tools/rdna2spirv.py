@@ -12327,8 +12327,10 @@ class Gen:
         elif op in ("v_mad_u64_u32", "v_mad_i64_i32"):
             # {sdst, v[d:d+1]} = S0 * S1 + S2 as a 65-bit result (RDNA ISA pseudocode): 32 x 32 -> 64-bit product,
             # unsigned or signed, plus the 64-bit S2. sdst (a lane mask) gets bit 64: the carry out for u64; for i64
-            # the sign of the exact sum, which a 65-bit two's-complement value always holds.
-            if a[0].get("n") != 2 or "clamp" in mods:
+            # the sign of the exact sum, which a 65-bit two's-complement value always holds. Under VOP3 clamp
+            # (measured natively on gfx1036), D saturates to UINT64_MAX (u64) or [INT64_MIN, INT64_MAX] (i64) while
+            # sdst still reports the real carry/sign bit 64.
+            if a[0].get("n") != 2:
                 raise Unsupported(op + " operands")
             vd, sd, s0, s1, s2 = a[0], a[1], a[2], a[3], a[4]
             signed = op == "v_mad_i64_i32"
@@ -12373,9 +12375,24 @@ class Gen:
                 self.emit(f"{same} = OpIEqual %bool {sp} {sc}")
                 self.emit(f"{neg} = OpSelect %uint {same} {sp} {sr}")
                 bit64 = neg
+                if "clamp" in mods:
+                    # Signed 64-bit overflow iff exact 65-bit sign (bit64) != wrapped sign (sr).
+                    ov, is_neg, sat_lo, sat_hi, cl_lo, cl_hi = (self.tmp() for _ in range(6))
+                    self.emit(f"{ov} = OpINotEqual %bool {bit64} {sr}")
+                    self.emit(f"{is_neg} = OpINotEqual %bool {bit64} {self.cu(0)}")
+                    self.emit(f"{sat_lo} = OpSelect %uint {is_neg} {self.cu(0)} {self.cu(0xFFFFFFFF)}")
+                    self.emit(f"{sat_hi} = OpSelect %uint {is_neg} {self.cu(0x80000000)} {self.cu(0x7FFFFFFF)}")
+                    self.emit(f"{cl_lo} = OpSelect %uint {ov} {sat_lo} {r_lo}")
+                    self.emit(f"{cl_hi} = OpSelect %uint {ov} {sat_hi} {r_hi}")
+                    r_lo, r_hi = cl_lo, cl_hi
             else:
                 bit64 = self.tmp()
                 self.emit(f"{bit64} = OpBitwiseOr %uint {c1} {c2}")
+                if "clamp" in mods:
+                    ov, cl_lo, cl_hi = self.tmp_bool_nz(bit64), self.tmp(), self.tmp()
+                    self.emit(f"{cl_lo} = OpSelect %uint {ov} {self.cu(0xFFFFFFFF)} {r_lo}")
+                    self.emit(f"{cl_hi} = OpSelect %uint {ov} {self.cu(0xFFFFFFFF)} {r_hi}")
+                    r_lo, r_hi = cl_lo, cl_hi
             self.dst({"k": "vgpr", "r": vd["r"], "n": 1}, r_lo)
             self.dst({"k": "vgpr", "r": vd["r"] + 1, "n": 1}, r_hi)
             if not (sd["k"] == "special" and sd["t"] == "null"):
