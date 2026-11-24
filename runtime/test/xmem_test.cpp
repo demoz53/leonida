@@ -511,9 +511,24 @@ void test_physical_pages_commit_on_touch(const PhysicalApi& api) {
     PERFORMANCE_INFORMATION touched{};
     GetPerformanceInfo(&touched, sizeof(touched));
     const int64_t touched_growth = commit_growth(mapped, touched);
-    check(touched_growth >= static_cast<int64_t>(kTouched * kPage64k / 2) &&
-              touched_growth < static_cast<int64_t>(kMapped * kPage64k),
-          "writing to 512 of them charges about those 512 pages");
+    const auto charged_about = [](int64_t growth, uint64_t pages_written) {
+        return growth >= static_cast<int64_t>(pages_written * kPage64k / 2) &&
+               growth < static_cast<int64_t>(kMapped * kPage64k);
+    };
+    bool charged = charged_about(touched_growth, kTouched);
+    // The commit charge is system-wide: another process allocating or freeing tens of MB in the window (a parallel
+    // build) moves it. Two more windows of pages the later checks do not use (640.. and 896..) are measured before
+    // the check gives up; each is a full measurement of its own.
+    for (const auto& [first, n] : {std::pair<uint64_t, uint64_t>{640, 256}, std::pair<uint64_t, uint64_t>{896, 128}}) {
+        if (charged) break;
+        PERFORMANCE_INFORMATION from{}, to{};
+        GetPerformanceInfo(&from, sizeof(from));
+        for (uint64_t i = first; i < first + n; ++i)
+            static_cast<volatile uint32_t*>(static_cast<void*>(window + i * kPage64k))[0] = 1;
+        GetPerformanceInfo(&to, sizeof(to));
+        charged = charged_about(commit_growth(from, to), n);
+    }
+    check(charged, "writing to 512 of them charges about those 512 pages");
     bool written = true;
     for (uint64_t i = 0; i < kTouched; ++i) written &= read_u32(window + i * kPage64k, 0) == (0xc0de0000u | i);
     check(written, "each touched page keeps what was written to it");
@@ -900,6 +915,100 @@ void print_result() {
 
 }  // namespace
 
+// Review B7: a commit without MEM_RESERVE (the measured 0x20401000) inside a reserve-only 64 KiB window, and over a
+// window piece that had pages mapped and unmapped (its own placeholder by then), gives writable memory; the rest of
+// the window still takes physical pages.
+void test_commit_into_window(const PhysicalApi& api) {
+    auto* const window = static_cast<uint8_t*>(
+        api.virtual_alloc(nullptr, 4 * kPage64k, MEM_RESERVE | kXmem64kPages, 0x27, PAGE_READWRITE));
+    check(window != nullptr, "B7: reserve a 64 KiB-page window");
+    if (!window) return;
+    uint64_t pages[1]{};
+    uint64_t count = 1;
+    check(api.allocate(0x380, &count, pages) == TRUE && count == 1, "B7: allocate one page");
+    check(api.map(window + kPage64k, 1, pages) == window + kPage64k, "B7: map a page into the window");
+    check(api.map(window + kPage64k, 1, nullptr) == window + kPage64k, "B7: unmap it again");
+
+    auto* const committed = static_cast<uint8_t*>(
+        api.virtual_alloc(window, 2 * kPage64k, MEM_COMMIT | kXmem64kPages, 0x27, PAGE_READWRITE));
+    check(committed == window, "B7: MEM_COMMIT inside the window returns its address");
+    if (committed) {
+        committed[0] = 0x11;
+        committed[2 * kPage64k - 1] = 0x22;
+        check(committed[0] == 0x11 && committed[2 * kPage64k - 1] == 0x22, "B7: the committed range is writable");
+    }
+    check(api.map(window + 3 * kPage64k, 1, pages) == window + 3 * kPage64k,
+          "B7: the uncommitted rest of the window still maps pages");
+    check(api.map(window + 3 * kPage64k, 1, nullptr) == window + 3 * kPage64k, "B7: unmap the rest");
+    check(api.map(window, 1, pages) == nullptr, "B7: the committed part is no longer a window");
+    check(api.free_pages(1, pages) == TRUE, "B7: free the page");
+}
+
+// Review M8: the title's VirtualFree(base, 0, MEM_RELEASE) of a window with pages mapped frees the whole window, and
+// the same pages map into a new window afterwards.
+void test_release_mapped_window(const PhysicalApi& api) {
+    const auto title_free = reinterpret_cast<BOOL(WINAPI*)(void*, SIZE_T, DWORD)>(
+        rt::shims::find("api-ms-win-core-memory-l1-1-0.dll", "VirtualFree"));
+    check(title_free != nullptr, "M8: registry exposes the title's VirtualFree");
+    if (!title_free) return;
+    auto* const window = static_cast<uint8_t*>(
+        api.virtual_alloc(nullptr, 4 * kPage64k, MEM_RESERVE | kXmem64kPages, 0x27, PAGE_READWRITE));
+    check(window != nullptr, "M8: reserve a window");
+    if (!window) return;
+    uint64_t pages[2]{};
+    uint64_t count = 2;
+    check(api.allocate(0x380, &count, pages) == TRUE && count == 2, "M8: allocate two pages");
+    check(api.map(window + kPage64k, 2, pages) == window + kPage64k, "M8: map them into the window");
+    check(title_free(window, 0, MEM_RELEASE) == TRUE, "M8: VirtualFree releases the mapped window");
+    bool all_free = true;
+    for (int i = 0; i < 4; ++i) {
+        MEMORY_BASIC_INFORMATION info{};
+        all_free = all_free && VirtualQuery(window + i * kPage64k, &info, sizeof info) && info.State == MEM_FREE;
+    }
+    check(all_free, "M8: every 64 KiB of the window is free afterwards");
+    check(api.map(window, 1, pages) == nullptr, "M8: the released window takes no pages");
+    auto* const again = static_cast<uint8_t*>(
+        api.virtual_alloc(nullptr, 2 * kPage64k, MEM_RESERVE | kXmem64kPages, 0x27, PAGE_READWRITE));
+    check(again != nullptr && api.map(again, 2, pages) == again, "M8: the pages map into a new window");
+    if (again) {
+        fill_page(again, 0x4d380000u);
+        check(page_holds(again, 0x4d380000u), "M8: the new window holds data");
+        check(title_free(again, 0, MEM_RELEASE) == TRUE, "M8: release the new window");
+    }
+    check(api.free_pages(2, pages) == TRUE, "M8: free the pages");
+    check(title_free(nullptr, 0, MEM_RELEASE) == FALSE, "M8: other calls pass through to the host");
+}
+
+// Review B8: a title's VirtualAlloc with the console page-size bits (2 MiB: MEM_LARGE_PAGES; 64 KiB: | MEM_PHYSICAL)
+// gets memory aligned to that page size without host large-page privileges; MEM_PHYSICAL alone is dropped.
+void test_title_page_modes() {
+    const auto alloc = reinterpret_cast<HostVirtualAllocFn>(rt::shims::find("kernel32.dll", "VirtualAlloc"));
+    if (!alloc) return;
+    struct Case {
+        DWORD bits;
+        uintptr_t alignment;
+        const char* what;
+    } const cases[] = {{MEM_LARGE_PAGES, 0x200000, "B8: MEM_LARGE_PAGES gives 2 MiB-aligned memory"},
+                       {MEM_LARGE_PAGES | MEM_PHYSICAL, 0x10000, "B8: 64 KiB pages give 64 KiB-aligned memory"},
+                       {MEM_PHYSICAL, 0x1000, "B8: MEM_PHYSICAL alone is dropped"}};
+    for (const Case& c : cases) {
+        void* const p = alloc(nullptr, 0x10000, MEM_RESERVE | MEM_COMMIT | c.bits | 0x10000000, PAGE_READWRITE);
+        check(p != nullptr && (reinterpret_cast<uintptr_t>(p) & (c.alignment - 1)) == 0, c.what);
+        if (!p) continue;
+        static_cast<volatile uint8_t*>(p)[0x0ffff] = 0x5a;
+        check(static_cast<volatile uint8_t*>(p)[0x0ffff] == 0x5a, "B8: the allocation is writable");
+        check(VirtualFree(p, 0, MEM_RELEASE), "B8: release the allocation");
+    }
+    // A plain title commit into a 64 KiB-page window the title reserved the same way.
+    auto* const window = static_cast<uint8_t*>(
+        alloc(nullptr, 2 * kPage64k, MEM_RESERVE | MEM_LARGE_PAGES | MEM_PHYSICAL, PAGE_READWRITE));
+    check(window != nullptr, "B8: a reserve-only 64 KiB-page title reservation");
+    if (!window) return;
+    auto* const committed = static_cast<uint8_t*>(alloc(window, kPage64k, MEM_COMMIT, PAGE_READWRITE));
+    check(committed == window, "B7/B8: a plain title commit into it succeeds");
+    if (committed) committed[kPage64k - 1] = 1;
+}
+
 int main() {
     std::printf("xmem_test: registered xmem.dll shim ABI\n");
 
@@ -972,8 +1081,11 @@ int main() {
         test_commit_physical_pages(physical);
         test_first_touch_during_remap(physical);
         test_placeholders(physical);
+        test_commit_into_window(physical);
+        test_release_mapped_window(physical);
         test_write_combine_window(physical);
     }
+    test_title_page_modes();
 
     print_result();
     return g_failures ? 1 : 0;
