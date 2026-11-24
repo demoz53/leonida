@@ -2682,10 +2682,9 @@ if(TARGET Vulkan::Headers)
                 LEONIDA_USER_DATA_SHIFT=4
                 $<TARGET_FILE:Python3::Interpreter> -I ${CMAKE_CURRENT_SOURCE_DIR}/test/shaders/build.py
                 ${LEONIDA_UPLOAD_DIR} cs_upload_read
-        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test/shaders/build.py
+        DEPENDS ${LEONIDA_TRANSLATOR_DEPS}
                 ${CMAKE_CURRENT_SOURCE_DIR}/test/shaders/compute_fixture.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/test/shaders/cs_upload_read.asm
-                ${CMAKE_CURRENT_SOURCE_DIR}/../tools/rdna2spirv.py
         COMMENT "Translating cs_upload_read for the upload-arena test"
         VERBATIM)
       add_executable(d3d12_upload_arena_test test/d3d12_upload_arena_test.cpp ${LEONIDA_UPLOAD_FILES})

@@ -518,10 +518,10 @@ def self_test():
     finally:
         globals()["translate_listing"] = real
 
-    # Negative controls: forms the contract rows say are rejected, not guessed.
+    # Negative controls: forms the contract rows say are rejected, not guessed. (Clamp on v_sad_u8 used to be one;
+    # the SAD-clamp change translates it now, so it is no longer a rejected form.)
     with tempfile.TemporaryDirectory(prefix="sad-diff-neg-") as tmp:
         for what, bad in (
-            ("clamp on v_sad_u8", ["v_mov_b32 v8, 1", "v_sad_u8 v8, v8, v8, v8 clamp"]),
             ("clamp on v_qsad_pk_u16_u8", ["v_qsad_pk_u16_u8 v[8:9], v[9:10], v11, v[12:13] clamp"]),
             ("a quad op to a single VGPR", ["v_qsad_pk_u16_u8 v8, v[9:10], v11, v[12:13]"]),
             ("a quad op with a single-VGPR S0", ["v_qsad_pk_u16_u8 v[8:9], v9, v10, v[11:12]"]),

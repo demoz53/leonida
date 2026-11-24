@@ -41,6 +41,10 @@ stop and ran the title's frame loop until the 900 s timeout: 100,457 D3D12 calls
 stubbed lists, #7007 not in the tree; 10,241 refusals on slot 57), one int3 stepped over (stop 26), the AcpHal, chad and
 xapu shims reached. Machine-side mitigation: a fixed 16 GB page file (commit ceiling 32 GB instead of 21 GB).
 
+The title sizes its pools from `XSystemGetAppMemoryUsageLimit` and `XMemGetWorkingSetStatistics`, which report the
+host's total RAM. `LEONIDA_TITLE_MEMORY_MB` overrides that answer (in MiB, clamped to 2048..65536), so a constrained
+host can tell the title it has less memory than the machine holds (`runtime/shims/xgameruntime.cpp`).
+
 ## 3. What the layer itself refuses at that depth
 
 In the run that first reached stop 28 (46 s, 89,964 calls, the 256 MiB default arena): `CreatePipelineState` 53,967 ok,
