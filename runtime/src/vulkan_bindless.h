@@ -50,6 +50,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <functional>
 #include <unordered_map>
 #include <vector>
@@ -82,6 +83,9 @@ struct BindlessFeatures {
         VK_SAMPLE_COUNT_1_BIT, VK_SAMPLE_COUNT_1_BIT, VK_SAMPLE_COUNT_1_BIT};
     // Descriptors in each binding, by binding number: bindless::bindings by default, or what size_bindings() chose.
     std::array<std::uint32_t, bindless::binding_count> counts = bindless::default_counts();
+    // maxUpdateAfterBindDescriptorsInAllPools with update_after_bind (size_bindings() sets it): every generation of
+    // the set has a pool of its own, and all that are alive count against it. No limit otherwise.
+    std::uint32_t pool_limit = 0xffffffffu;
 };
 
 namespace bindless {
@@ -239,6 +243,7 @@ inline bool size_bindings(BindlessFeatures& features, const VkPhysicalDeviceLimi
     std::uint32_t resource_limit = uab ? v12.maxPerStageUpdateAfterBindResources : limits.maxPerStageResources;
     resource_limit -= std::min(resource_limit, std::min(limits.maxColorAttachments, 8u));
     const std::uint32_t pool_limit = uab ? v12.maxUpdateAfterBindDescriptorsInAllPools : 0xffffffffu;
+    features.pool_limit = pool_limit;
 
     auto& counts = features.counts;
     counts = default_counts();
@@ -309,6 +314,31 @@ inline bool size_bindings(BindlessFeatures& features, const VkPhysicalDeviceLimi
     return full;
 }
 
+// How many retired generations of the set may wait for their submissions, at most `cap` (D4). Each generation has a
+// pool of the whole set's size, and a flush that replaces the table makes a new one while the current, the spare
+// (spare_sets) and the retired ones are still alive: they must all fit features.pool_limit
+// (maxUpdateAfterBindDescriptorsInAllPools). Past it the owner waits for the oldest instead, as at `cap`. 0 when no
+// retired generation fits beside the others (the replacing flush may then fail, as before).
+// How many whole sets' pools fit features.pool_limit; UINT64_MAX without a limit.
+inline std::uint64_t set_budget(const BindlessFeatures& features) {
+    std::uint64_t per_set = 0;
+    for (std::uint32_t b = 0; b < binding_count; ++b)
+        if (binding_enabled(b, features)) per_set += features.counts[b];
+    if (!per_set || features.pool_limit == 0xffffffffu) return UINT64_MAX;
+    return features.pool_limit / per_set;
+}
+
+// Spare sets BindlessSet keeps for reuse (I8): one where the budget has room for it beside the current set, the one
+// a replacing flush makes and at least one retired generation; none otherwise.
+inline std::size_t spare_sets(const BindlessFeatures& features) { return set_budget(features) >= 4 ? 1 : 0; }
+
+inline std::size_t retired_generation_cap(const BindlessFeatures& features, std::size_t cap) {
+    const std::uint64_t generations = set_budget(features);
+    if (generations == UINT64_MAX) return cap;
+    const std::uint64_t others = 2 + spare_sets(features);  // the current set, the new one, the spare
+    return generations <= others ? 0 : std::size_t(std::min<std::uint64_t>(cap, generations - others));
+}
+
 } // namespace bindless
 
 class BindlessSet {
@@ -321,6 +351,8 @@ public:
 
     ~BindlessSet() {
         release_retired();
+        for (const Spare& spare : spares_) vk_.vkDestroyDescriptorPool(device_, spare.pool, nullptr);
+        spares_.clear();
         destroy(table_buffers_);
         if (fallback_sampler_) vk_.vkDestroySampler(device_, fallback_sampler_, nullptr);
         for (const VkImageView view : fallback_views_) vk_.vkDestroyImageView(device_, view, nullptr);
@@ -336,6 +368,7 @@ public:
     BindlessSet& operator=(const BindlessSet&) = delete;
 
     bool ok() const { return ok_; }
+    const BindlessFeatures& features() const { return features_; }  // the device's cap reads pool_limit (D4)
     bool supports_ms_class(std::uint32_t component_class) const {
         return component_class < classes && features_.ms_samples[component_class] != VK_SAMPLE_COUNT_1_BIT;
     }
@@ -503,9 +536,13 @@ public:
             if (pending.binding >= shadow_.size() || pending.index >= shadow_[pending.binding].size()) continue;
             shadow_[pending.binding][pending.index] = pending.info;
             shadow_written_[pending.binding][pending.index] = 1;
+            delta_log_.push_back({pending.binding, pending.index});  // write number write_seq_
+            ++write_seq_;
         }
         if (replaced) {
-            write_shadow();  // includes the pending writes just folded in
+            // Both include the pending writes just folded in.
+            if (new_set_synced_ == fresh_set) write_shadow();
+            else write_delta(new_set_synced_);
         } else if (!pending_.empty()) {
             std::vector<VkWriteDescriptorSet> writes(pending_.size());
             for (std::size_t i = 0; i < pending_.size(); ++i) {
@@ -521,23 +558,31 @@ public:
         }
         pending_.clear();
         pending_slots_.clear();
+        prune_delta_log();
         return written;
     }
 
     // Frees the generations (table buffers and descriptor set) that flush() retired with a ticket up to `completed`.
     // The default frees all of them: when nothing submitted before the last flush() still runs.
+    // A freed generation's set is kept as a spare (bindless::spare_sets) for the next generation to reuse (I8).
     void release_retired(std::uint64_t completed = UINT64_MAX) {
         std::size_t kept = 0;
         for (auto& generation : retired_) {
             if (generation.ticket <= completed) {
                 destroy(generation.buffers);
-                if (generation.pool) vk_.vkDestroyDescriptorPool(device_, generation.pool, nullptr);
+                if (generation.pool && spares_.size() < bindless::spare_sets(features_))
+                    spares_.push_back({generation.pool, generation.set, generation.synced});
+                else if (generation.pool)
+                    vk_.vkDestroyDescriptorPool(device_, generation.pool, nullptr);
             } else {
                 retired_[kept++] = generation;
             }
         }
         retired_.resize(kept);
+        prune_delta_log();
     }
+    // Spare sets kept for reuse.
+    std::size_t spare_count() const { return spares_.size(); }
     bool has_retired() const { return !retired_.empty(); }
     // True when the last flush() started a new generation: its table upload is in that flush's command buffer, so
     // work on other queues that binds the new set must run after it (the owner orders them).
@@ -688,6 +733,51 @@ private:
             vk_.vkUpdateDescriptorSets(device_, std::uint32_t(writes.size()), writes.data(), 0, nullptr);
     }
 
+    // Brings a reused set, current until write number `synced`, up to date: the elements written since, once each,
+    // from the shadow. Falls back to write_shadow when the log no longer reaches back that far.
+    void write_delta(std::uint64_t synced) {
+        if (synced < delta_base_ || synced > write_seq_) {
+            write_shadow();
+            return;
+        }
+        std::vector<std::uint64_t> slots;
+        slots.reserve(std::size_t(write_seq_ - synced));
+        for (std::size_t i = std::size_t(synced - delta_base_); i < delta_log_.size(); ++i)
+            slots.push_back((std::uint64_t(delta_log_[i].binding) << 32) | delta_log_[i].index);
+        std::sort(slots.begin(), slots.end());
+        slots.erase(std::unique(slots.begin(), slots.end()), slots.end());
+        std::vector<VkWriteDescriptorSet> writes;
+        writes.reserve(slots.size());
+        for (const std::uint64_t slot : slots) {
+            const auto binding = std::uint32_t(slot >> 32), index = std::uint32_t(slot);
+            VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            write.dstSet = set_;
+            write.dstBinding = binding;
+            write.dstArrayElement = index;
+            write.descriptorCount = 1;
+            write.descriptorType = bindless::bindings[binding].type;
+            write.pImageInfo = &shadow_[binding][index];
+            writes.push_back(write);
+        }
+        if (!writes.empty())
+            vk_.vkUpdateDescriptorSets(device_, std::uint32_t(writes.size()), writes.data(), 0, nullptr);
+    }
+
+    // Drops the log entries no spare or retired set will need (they are all past them); a log grown past four times
+    // the shadow (a generation retired for long while descriptors churn) is dropped whole, and those sets will take
+    // a full write_shadow instead.
+    void prune_delta_log() {
+        std::uint64_t needed = write_seq_;
+        for (const Spare& spare : spares_) needed = std::min(needed, spare.synced);
+        for (const Generation& generation : retired_) needed = std::min(needed, generation.synced);
+        std::size_t shadow_size = 0;
+        for (const auto& written : shadow_written_) shadow_size += written.size();
+        if (delta_log_.size() > 4 * shadow_size + 4096) needed = write_seq_;  // stale ones fall back to write_shadow
+        if (needed <= delta_base_) return;
+        delta_log_.erase(delta_log_.begin(), delta_log_.begin() + std::ptrdiff_t(needed - delta_base_));  // a deque
+        delta_base_ = needed;
+    }
+
     // One 1x1 image for each image type and component class, and the views of them every binding needs.
     bool create_fallbacks() {
         // Each MS class shares one sampled-only fallback between its 2D and 2D-array views.
@@ -830,13 +920,24 @@ private:
             VkDescriptorPool pool = VK_NULL_HANDLE;
             VkDescriptorSet set = VK_NULL_HANDLE;
             bool device_local = false;
-            if (!create(larger.table, bytes, true, &device_local) || !create(larger.staging, bytes, false) ||
-                !make_set(pool, set)) {
+            if (!create(larger.table, bytes, true, &device_local) || !create(larger.staging, bytes, false)) {
+                destroy(larger);
+                return false;
+            }
+            // A spare set (a retired generation whose submissions are done) takes only what changed since it was
+            // current (flush, write_delta); a new one takes everything (write_shadow).
+            new_set_synced_ = fresh_set;
+            if (!spares_.empty()) {
+                pool = spares_.back().pool;
+                set = spares_.back().set;
+                new_set_synced_ = spares_.back().synced;
+                spares_.pop_back();
+            } else if (!make_set(pool, set)) {
                 destroy(larger);
                 return false;
             }
             table_device_local_ = device_local;
-            retired_.push_back({table_buffers_, pool_, set_, retire_ticket});
+            retired_.push_back({table_buffers_, pool_, set_, retire_ticket, write_seq_});
             table_buffers_ = larger;
             pool_ = pool;
             set_ = set;
@@ -1041,8 +1142,27 @@ private:
         VkDescriptorPool pool = VK_NULL_HANDLE;  // owns the descriptor set
         VkDescriptorSet set = VK_NULL_HANDLE;
         std::uint64_t ticket = 0;
+        std::uint64_t synced = 0;  // the set holds every descriptor write numbered below this (write_seq_)
     };
     std::vector<Generation> retired_;
+    // I8: freed generations' sets, kept for the next generation to reuse, and the log of descriptor writes that
+    // brings one up to date. Write numbers start at 1; entry k of delta_log_ is write delta_base_ + k, and
+    // delta_base_ + delta_log_.size() == write_seq_.
+    struct Spare {
+        VkDescriptorPool pool = VK_NULL_HANDLE;
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        std::uint64_t synced = 0;
+    };
+    struct LoggedWrite {
+        std::uint32_t binding;
+        std::uint32_t index;
+    };
+    static constexpr std::uint64_t fresh_set = 0;  // new_set_synced_ of a set just made: write_shadow
+    std::vector<Spare> spares_;
+    std::deque<LoggedWrite> delta_log_;
+    std::uint64_t delta_base_ = 1;
+    std::uint64_t write_seq_ = 1;
+    std::uint64_t new_set_synced_ = fresh_set;  // of the set the last replacing upload_table took
     std::uint64_t generations_made_ = 0;
     bool last_flush_replaced_ = false;
     std::array<VkDescriptorPoolSize, bindless::bindings.size()> pool_sizes_{};

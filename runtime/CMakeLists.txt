@@ -1499,6 +1499,23 @@ if(TARGET Vulkan::Headers)
     add_test(NAME vk_queue_query_sync COMMAND vk_queue_query_sync_test)
     set_tests_properties(vk_queue_query_sync PROPERTIES SKIP_RETURN_CODE 77)
   endif()
+  # A new bindless generation reuses a spare set and writes only what changed (I8).
+  add_executable(vk_bindless_generation_test test/vk_bindless_generation_test.cpp)
+  target_link_libraries(vk_bindless_generation_test PRIVATE Vulkan::Headers ${CMAKE_DL_LIBS})
+  if(WIN32)
+    target_compile_definitions(vk_bindless_generation_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+  else()
+    find_package(Threads REQUIRED)
+    target_link_libraries(vk_bindless_generation_test PRIVATE Threads::Threads)
+  endif()
+  if(MSVC)
+    target_compile_options(vk_bindless_generation_test PRIVATE /W4 /permissive- /utf-8)
+  endif()
+  if(BUILD_TESTING)
+    add_test(NAME vk_bindless_generation COMMAND vk_bindless_generation_test)
+    set_tests_properties(vk_bindless_generation PROPERTIES SKIP_RETURN_CODE 77
+                         FAIL_REGULAR_EXPRESSION "Validation Error;VUID-")
+  endif()
   # With LEONIDA_VK_VALIDATION=1: synchronization validation reports a missing barrier (and not a present one), so
   # the other GPU tests' "0 validation errors" was checked by an active layer. 77 without validation or a device.
   add_executable(vk_sync_validation_selftest test/vk_sync_validation_selftest.cpp)

@@ -5364,9 +5364,11 @@ public:
                 // A queue whose work is stalled (a fence only the CPU signals, long async work) keeps its ticket from
                 // completing, and each replacing flush adds a generation. Past the cap wait, once the oldest is in the
                 // way, for the submissions up to its ticket (the queues' timelines, not the device), with the
-                // descriptor lock released: the thread that signals such a fence may need it.
-                constexpr std::size_t max_retired = 8;
-                if (state_.bindless->retired_count() > max_retired) {
+                // descriptor lock released: the thread that signals such a fence may need it. The cap is lower where
+                // the pools of that many generations would not fit maxUpdateAfterBindDescriptorsInAllPools (D4).
+                const std::size_t max_retired =
+                    leonida::bindless::retired_generation_cap(state_.bindless->features(), 8);
+                while (state_.bindless->retired_count() > max_retired) {
                     if (!state_.bindless_cap_logged.exchange(true))
                         std::fprintf(stderr, "[rt] d3d12: more than %zu retired bindless table generations: waiting "
                                              "for the queues that still use the oldest\n", max_retired);
@@ -5374,6 +5376,7 @@ public:
                     lock.unlock();
                     const std::uint64_t completed = context.wait_retire_ticket(oldest);
                     lock.lock();
+                    if (!completed) break;  // device lost: nothing completes any more
                     state_.bindless->release_retired(completed);
                 }
             }
