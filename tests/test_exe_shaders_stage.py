@@ -350,7 +350,9 @@ class ShadersStageWithTheExe(unittest.TestCase):
 
             def fake_translate(disasm, spirv, jobs, emulate=False, fallbacks=()):
                 ran.append("translate")
-                write("", spirv, "index.json")
+                # make_game's native PSO step (#497) reads this index after the translation, as in
+                # tests/test_bvh_shaders_stage.py
+                write('{"shader": {"stage": "vs"}}', spirv, "index.json")
 
             def stage():
                 ran.clear()
