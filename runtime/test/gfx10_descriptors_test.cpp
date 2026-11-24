@@ -378,18 +378,21 @@ int main() {
     CHECK(info.addressModeV == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE && info.mipLodBias == -0.75f);
     CHECK(info.minLod == 0.5f && info.maxLod == 4.25f);
     info = vulkan_sampler({.mag_filter = Filter::aniso_point, .mip_filter = MipFilter::linear, .max_anisotropy = 8,
-                           .compare = CompareFunction::greater, .max_lod = 9.0f, .unnormalized = true});
+                           .compare = CompareFunction::greater, .min_lod = 1.5f, .max_lod = 9.0f,
+                           .lod_bias = 2.5f, .unnormalized = true});
     CHECK(info.unnormalizedCoordinates == VK_TRUE && info.mipmapMode == VK_SAMPLER_MIPMAP_MODE_NEAREST);
-    CHECK(info.maxLod == 0.0f && info.anisotropyEnable == VK_FALSE && info.compareEnable == VK_FALSE);
+    CHECK(info.minLod == 0.0f && info.maxLod == 0.0f && info.mipLodBias == 0.0f);
+    CHECK(info.anisotropyEnable == VK_FALSE && info.compareEnable == VK_FALSE);
     // Unnormalised: U and V clamp (wrap, the default S# mode, would be invalid: VUID ...-01075), border stays border,
-    // W is free; min and mag filter agree (VUID ...-01072).
+    // W is free; min and mag filter agree (VUID ...-01072); mipLodBias is zero (VUID ...-01074).
     CHECK(info.addressModeU == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE &&
           info.addressModeV == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE &&
           info.addressModeW == VK_SAMPLER_ADDRESS_MODE_REPEAT && info.minFilter == info.magFilter);
     info = vulkan_sampler({.address_u = AddressMode::clamp_border, .address_v = AddressMode::mirror,
-                           .min_filter = Filter::bilinear, .unnormalized = true});
+                           .min_filter = Filter::bilinear, .lod_bias = -3.25f, .unnormalized = true});
     CHECK(info.addressModeU == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER &&
-          info.addressModeV == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE && info.minFilter == VK_FILTER_NEAREST);
+          info.addressModeV == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE && info.minFilter == VK_FILTER_NEAREST &&
+          info.mipLodBias == 0.0f);
     CHECK(vulkan_address_mode(AddressMode::mirror) == VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT);
     CHECK(vulkan_address_mode(AddressMode::mirror_once_last_texel) == VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE);
     CHECK(vulkan_address_mode(AddressMode::clamp_half_border) == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
