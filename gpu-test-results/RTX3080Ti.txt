@@ -1,0 +1,66 @@
+GPU:        NVIDIA GeForce RTX 3080 Ti (Ampere, PCI 10de:2208), subgroup 32..32
+Driver:     NVIDIA 621.24, Vulkan 1.4.357
+Subgroup:   32..32 (minSubgroupSize 32, maxSubgroupSize 32)
+OS:         Windows 11, 10.0.26300.9974
+Commit:     da60a36159a74620192a366180423386760f52fb (main, 2026-11-23)
+Tools:      llvm-mc 21.1.8 (scripts\build_llvm_mc.ps1, AMDGPU target), SPIRV-Tools v2026.4
+            (Vulkan SDK 1.4.363.0), CMake 4.4.4, Visual Studio 17 2022 generator,
+            MSVC 19.44.35230.0, Windows SDK 10.0.26100.0, Python 3.15.2
+run_gpu_tests.py: 257 shaders: 257 translated, 257 pass spirv-val
+            native:                 196/248 passed, 49 skipped, 3 failed
+            LEONIDA_W64_EMULATE=1:  227/248 passed, 17 skipped, 4 failed
+Failed:     cs_imgload_tfe (native and emulated): exit 1. vk_store_test reports
+            "r32 sint (sint view): 64 bad, texel(5,3) = 2071", where the expected value
+            is 71: every texel is off by exactly 2000, the value the fixture seeds the
+            tfe status VGPR with. The rgba8 and r32 uint views are exact (0 bad).
+            cs_imgload_d16_tfe (native and emulated): the same, 64 bad, texel(5,3) = 2071.
+            Both have the signature of #31 (Radeon 780M), so this is not an AMD-only
+            effect.
+            cs_w32_exec_computed (native and emulated): got 8192 8192 8192 7682 512 4100 0 3
+            cs_w64_exec_computed (emulated; skipped native): got 8224 8192 16384 16384 8192 4132 0 3
+            The SHADER-1264 fixtures (#15). The translator fix (#24) was merged after the
+            commit above. With the translator of 84347bbb6 and the same test programs,
+            both pass on this GPU: cs_w32_exec_computed 259 1028 3088 7682 512 4100 0 3
+            (native and emulated), cs_w64_exec_computed 291 1028 11264 771 8192 4132 0 3
+            (emulated).
+Skipped:    native, 49: 33 need a 64-wide subgroup this device does not have (31 "no
+            64-wide compute subgroup", 1 "no 64-wide subgroup", 1 "cannot require a
+            64-wide fragment subgroup": ps_w64x_readlane); 16 are the documented "run by
+            d3d12_*_test / w64_graphics.py" cases.
+            emulated, 17: ps_w64x_readlane (as above) and the same 16.
+ctest:      runtime tests, RelWithDebInfo, the D3D12 layer on Vulkan against this GPU:
+            290 tests, 278 passed, 3 failed, 9 skipped (shader_library_corpus,
+            bink_decode, bink_abi, bink_play_headless, bink_audio, vk_sync_validation,
+            d3d12_rgb9e5_rtv, d3d12_boot_movie, d3d12_first_light).
+            d3d12_execute_indirect_validation: 49 parity cases, 5 failures. In all five
+            the layer refuses the call as the test expects, and both hosts accept it
+            ("layer=0 warp=1 hw=1 expected=0"):
+              arg_offset=260 >width (max=0 no-op)
+              arg_offset=U64MAX-3 aligned (max=0 no-op)
+              draw stride=20 off=240 max=1 (240+20>256)
+              draw stride=20 off=220 max=2 (220+40>256)
+              dispatch stride=20 off=244 max=1 (244+20>256)
+            d3d12_depth_resolve: exit 1. "74 of 97 match, 15 host quirks, 7 refusals
+            alike" against this GPU (96 of 97 accounted for); against WARP "71 of 71
+            match, 0 host quirks, 7 refusals alike". The output names no failing case.
+            #66 is open for this test.
+            d3d12_vulkan_device: exit 1, reproduced when run on its own, at
+            "line 6576: tiles == 1", right after "device slot 78 routed to
+            SetFrameIntervalX". Every comparison before it reports 0 mismatches
+            (FORMAT_INFO 195 queries, CheckFeatureSupport 46, FORMAT_SUPPORT 98 formats,
+            copy comparison 0 of 75 differ, resolve comparison 60 of 60). This is the
+            failure #262 and #238 are open for (CreateReservedResource2 called through
+            the Xbox proxy, whose slot 78 is SetFrameIntervalX), not a GPU effect.
+Notes:
+- Built with cmake -S runtime -B <build> -G "Visual Studio 17 2022" -A x64
+  -DLEONIDA_VULKAN_HEADERS_FETCH=ON -DLEONIDA_SDL3_FETCH=ON and
+  cmake --build <build> --config RelWithDebInfo. The build folder was outside the
+  checkout because the checkout's path was too long for MSBuild.
+- Every pixel and compute case not listed under Failed or Skipped was exact.
+- build.py and check.py were not run on their own; the counts come from
+  run_gpu_tests.py, which builds and translates the same fixtures.
+- During ctest, loader_test raised a Windows "Bad Image" box for its deliberately
+  broken compat_bad/testcompat.dll and waited for a click (28.69 s). #239 fixes that
+  in the loader.
+- No game files were on this machine: nothing here was run against the retail package.
+- AI-assisted (Claude Code).
