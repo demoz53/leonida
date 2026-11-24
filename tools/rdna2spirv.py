@@ -10726,7 +10726,25 @@ class Gen:
                 f = self.clamp_f16(f, mods)
                 self.f16_out(a[0], f, dhi)
             else:
-                if any(m == "clamp" or m.startswith(("mul:", "div:")) for m in mods):
+                # Measured natively on RDNA2 (gfx1036 across all 4 HW_REG_MODE configs 0x1c0/0x100/0x3c0/0x200):
+                # VOP3 clamp and mul:2/mul:4/div:2 (and SDWA clamp) are hardware no-ops on these integer-destination
+                # conversions, matching v_cvt_norm_{i16,u16}_f16. Keep rejecting unknown modifiers and invalid forms.
+                raw_op = ins["op"]
+                if raw_op.endswith("_sdwa"):
+                    bad_mod = any(
+                        m != "clamp" and m.split(":", 1)[0] not in ("src0_sel", "dst_sel", "dst_unused")
+                        for m in mods
+                    )
+                elif raw_op.endswith("_dpp"):
+                    bad_mod = bool(self.non_dpp_mods(raw_op, mods))
+                elif raw_op.endswith("_e32"):
+                    bad_mod = bool(mods)
+                else:
+                    bad_mod = any(
+                        m not in ("clamp", "mul:2", "mul:4", "div:2") and not m.startswith("op_sel:")
+                        for m in mods
+                    )
+                if bad_mod:
                     raise Unsupported(op + " output modifier")
                 x = self.f16_in(a[1], sel[0])
                 nan, xs, tr, cl, conv, lo = (self.tmp() for _ in range(6))
