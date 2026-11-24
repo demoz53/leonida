@@ -245,12 +245,12 @@ public:
 
     // Adds `count` pipeline-statistics results into one D3D12_QUERY_DATA_PIPELINE_STATISTICS at dst + offset: the
     // segments of a statistics query that was split around helper dispatches (D3D-162) or mesh draws (D3D-291).
-    // Segment i is in `mesh_queries` when mesh[i] is set (four counters: clipping, fragment and compute; see
+    // Segment i is in `mesh_queries` when mesh[i] is set (two counters: fragment and compute; see
     // statistics_sum.comp), otherwise in `queries` (all eleven).
     void sum_statistics(VkCommandBuffer cb, VkQueryPool queries, VkQueryPool mesh_queries, const std::uint8_t* mesh,
                         std::uint32_t first, std::uint32_t count, VkBuffer dst, VkDeviceSize offset) const {
         constexpr VkDeviceSize result = statistics_counters * word_size;
-        constexpr VkDeviceSize mesh_slot = 5 * word_size;  // CInvocations, where the mesh pool's first counter goes
+        constexpr VkDeviceSize mesh_slot = 7 * word_size;  // PSInvocations, where the mesh pool's first counter goes
         begin_scratch_write(cb);
         vk_.vkCmdFillBuffer(cb, scratch_, 0, result, 0);
         bind(cb, statistics_pipeline_);
@@ -2482,15 +2482,12 @@ private:
             if (std::find(statistics->mesh.begin(), statistics->mesh.end(), 1) == statistics->mesh.end()) {
                 statistics->mesh.clear();
             } else {
-                // The counters a mesh draw allows (VUID-vkCmdDrawMeshTasksEXT-pipelineStatistics-07076): clipping
-                // invocations and primitives, fragment and compute invocations (D3D-291).
+                // The counters a mesh draw allows (VUID-vkCmdDrawMeshTasksEXT-pipelineStatistics-07076): the
+                // fragment and compute invocations, and no other (D3D-291).
                 VkQueryPoolCreateInfo info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
                 info.queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS;
                 info.queryCount = statistics_segments;
-                info.pipelineStatistics = VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT |
-                                          VK_QUERY_PIPELINE_STATISTIC_CLIPPING_PRIMITIVES_BIT |
-                                          VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT |
-                                          VK_QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_INVOCATIONS_BIT;
+                info.pipelineStatistics = kMeshStatisticsFlags;
                 if (context_.vk.vkCreateQueryPool(statistics->device, &info, nullptr, &statistics->mesh_pool) !=
                     VK_SUCCESS)
                     return ReplayResult::unsupported;

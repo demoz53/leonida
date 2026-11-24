@@ -755,6 +755,21 @@ int main() {
         expect(q[3].statistics_first == 1 && q[3].statistics_count == 3, "overlap-mesh: query 1 sums segments 1-3");
     }
 
+    // 17. D3D-291: the pool a mesh draw runs in must not enable a counter
+    //     VUID-vkCmdDrawMeshTasksEXT-pipelineStatistics-07076 forbids, or the validation layer reports the VUID on
+    //     every DispatchMesh inside a statistics query. The VUID leaves the fragment and compute invocations
+    //     allowed, and those are the two the mesh pool counts; the nine it names are the rest of the eleven.
+    {
+        constexpr VkQueryPipelineStatisticFlags all_counters = 0x7ff;  // the counters of a D3D12 statistics heap
+        expect((kMeshStatisticsFlags & kForbiddenMeshStatisticsFlags) == 0,
+               "the mesh pool enables none of the counters the VUID forbids");
+        expect((all_counters & ~kForbiddenMeshStatisticsFlags) == kMeshStatisticsFlags,
+               "the mesh pool counts every counter the VUID leaves allowed");
+        expect(kMeshStatisticsFlags == (VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT |
+                                        VK_QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_INVOCATIONS_BIT),
+               "the mesh pool counts the fragment and compute invocations");
+    }
+
     if (failures) return 1;
     std::puts("replay_query_predication_test: query resolves suspend conditional rendering around fills, copies and dispatches");
     return 0;

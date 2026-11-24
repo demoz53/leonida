@@ -487,8 +487,11 @@ int main() {
         // query 2 the two vertex draws alone. A mesh draw has no input assembly or vertex shader, so those fields
         // count only the two full-screen triangles (3 vertices, 1 primitive each). How many clipping and pixel
         // shader invocations a draw makes is the driver's (RADV's PSInvocations is not the pixel count), so query
-        // 0 is checked against query 2: more of both is the mesh segment's share. Under LEONIDA_VK_VALIDATION=1 the
-        // run must stay free of VUID-vkCmdDrawMeshTasksEXT-pipelineStatistics-07076.
+        // 0 is checked against query 2: more pixel shader invocations is the mesh segment's share. A mesh segment
+        // runs in a pool that counts the fragment and compute invocations only, because
+        // VUID-vkCmdDrawMeshTasksEXT-pipelineStatistics-07076 leaves the clipping counters out of a pool that is
+        // active during a mesh draw; D3D12 counts the clipping invocations and primitives of a mesh pipeline, so
+        // those two fields read 0 here. Under LEONIDA_VK_VALIDATION=1 the run must stay free of the VUID.
         if (d.pipeline_statistics_query) {
             const D3D12_QUERY_HEAP_DESC statistics_desc{D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS, 3, 0};
             Ref<ID3D12QueryHeap> statistics;
@@ -554,11 +557,11 @@ int main() {
             EXPECT(vertex_only.IAVertices == 6 && vertex_only.IAPrimitives == 2);
             EXPECT(mixed.GSInvocations == 0 && mixed.GSPrimitives == 0 && mixed.HSInvocations == 0 &&
                    mixed.DSInvocations == 0 && mixed.CSInvocations == 0);
-            EXPECT(mixed.CInvocations > vertex_only.CInvocations && mixed.PSInvocations > vertex_only.PSInvocations);
+            EXPECT(mixed.CInvocations == vertex_only.CInvocations && mixed.PSInvocations > vertex_only.PSInvocations);
             EXPECT(mesh_only.IAVertices == 0 && mesh_only.IAPrimitives == 0 && mesh_only.VSInvocations == 0 &&
                    mesh_only.GSInvocations == 0 && mesh_only.GSPrimitives == 0 && mesh_only.HSInvocations == 0 &&
                    mesh_only.DSInvocations == 0 && mesh_only.CSInvocations == 0);
-            EXPECT(mesh_only.CInvocations > 0 && mesh_only.PSInvocations > 0);
+            EXPECT(mesh_only.CInvocations == 0 && mesh_only.CPrimitives == 0 && mesh_only.PSInvocations > 0);
         } else {
             std::printf("pipelineStatisticsQuery not available: the D3D-291 statistics check is skipped\n");
         }

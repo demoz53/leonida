@@ -3329,23 +3329,24 @@ Implemented (`QueryHeap` in `runtime/shims/d3d12_vulkan_device.cpp`, the query c
   recording. The resolve fallback is unchanged: only resolves needing dispatches are refused there.
 - **Mesh draws during a pipeline-statistics query** (D3D-291). D3D12 allows `DispatchMesh` inside a statistics query
   and reads its input-assembly, vertex, geometry and tessellation fields as 0. Vulkan forbids `vkCmdDrawMeshTasksEXT`
-  while a query with those counters is active (`VUID-vkCmdDrawMeshTasksEXT-pipelineStatistics-07076`), and the heap's
-  pool has all eleven. So a statistics query that holds a mesh draw is split as above, and a split before a draw stays
-  outside its rendering scope. A segment's first draw decides its pool: the submission's full pool, or a second pool
-  with only clipping invocations and primitives, fragment and compute invocations. A later draw of the other kind ends
+  while a query with the input-assembly, vertex, geometry, tessellation or clipping counters is active
+  (`VUID-vkCmdDrawMeshTasksEXT-pipelineStatistics-07076`), and the heap's pool has all eleven. So a statistics query
+  that holds a mesh draw is split as above, and a split before a draw stays outside its rendering scope. A segment's first draw decides its pool: the submission's full pool, or a second pool
+  with only the fragment and compute invocations, the two the VUID leaves allowed. A later draw of the other kind ends
   the segment and begins one of its own kind; dispatches and segments without draws use the full pool, and
-  `ExecuteIndirect` draws count as vertex draws. The sum copies a mesh segment's four counters into fields 5 to 8 of
-  its record, and `statistics_sum.comp` adds them as `CInvocations`, `CPrimitives`, `PSInvocations` and
-  `CSInvocations`, so the other fields get nothing from it. A query that holds only mesh draws is one mesh segment,
-  resolved through the same sum. Without the compute helper there is no segment pool and such a list is refused
-  (`unsupported`) rather than run unsplit; so is one on the single-list `replay()` (D3D-399), whose
-  `create_segment_pool` gives no mesh pool. Overlapping statistics queries (D3D-252) split the same way inside their
-  shared segments: a draw of the other kind than the open segment's opens a new one, so every query that segment
-  belongs to sums both kinds. `replay_query_predication_test` (cases 15 and 16) checks the split points, the segment
-  kinds and the resolve plan on the CPU. `d3d12_mesh_test` resolves a query around a vertex, two mesh and a vertex
-  draw, one around a mesh draw and one around the two vertex draws: the vertex fields count only the two triangles,
-  and the mixed query has more clipping and pixel-shader invocations than the vertex-only one. On the RX 9060 XT
-  (RADV), the clipping counts add up exactly (2 + 10 = 12).
+  `ExecuteIndirect` draws count as vertex draws. The sum copies a mesh segment's two counters into fields 7 and 8 of
+  its record, and `statistics_sum.comp` adds them as `PSInvocations` and `CSInvocations`, so the other fields get
+  nothing from it. D3D12 counts the clipping invocations and primitives of a mesh pipeline, but Vulkan has no counter
+  for them during a mesh draw, so `CInvocations` and `CPrimitives` read 0 for a mesh segment. A query that holds only
+  mesh draws is one mesh segment, resolved through the same sum. Without the compute helper there is no segment pool
+  and such a list is refused (`unsupported`) rather than run unsplit; so is one on the single-list `replay()` (D3D-399),
+  whose `create_segment_pool` gives no mesh pool. Overlapping statistics queries (D3D-252) split the same way inside
+  their shared segments: a draw of the other kind than the open segment's opens a new one, so every query that segment
+  belongs to sums both kinds. `replay_query_predication_test` (cases 15 to 17) checks the split points, the segment
+  kinds, the resolve plan and the counters the mesh pool may enable on the CPU. `d3d12_mesh_test` resolves a query
+  around a vertex, two mesh and a vertex draw, one around a mesh draw and one around the two vertex draws: the vertex
+  fields count only the two triangles, the mixed query has the same clipping count as the vertex-only one and more
+  pixel-shader invocations, and the mesh-only query has no clipping count.
 - **Timestamps.** `GetTimestampFrequency` is `1e9 / timestampPeriod` (1 GHz on the test GPU). All queues of a
   device use the same `timestampPeriod`, a device property, so they share one frequency.
 - **Timestamp resolves on MoltenVK.** On Apple GPUs, MoltenVK delays every `vkCmdWriteTimestamp` to the end of

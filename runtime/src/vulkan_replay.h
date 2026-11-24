@@ -2392,10 +2392,26 @@ inline ReplayResult plan_occlusion_segments(PreparedList& out) {
 // Helper dispatches must not contribute to the application's CSInvocations (D3D-162). Query resolves and
 // ordinary helper commands share one sequence of physical statistics segments. Resolve dispatch requirements
 // depend on heap state at planning time, so every non-timestamp resolve splits conservatively.
-// A mesh draw cannot run while a query with the input-assembly, vertex, geometry or tessellation counters is active
-// (VUID-vkCmdDrawMeshTasksEXT-pipelineStatistics-07076), though D3D12 allows it and reads those fields as 0. A query
-// that holds a mesh draw is split as well (D3D-291): a segment's first draw decides whether it runs in the full pool
-// or in the mesh one (statistics_mesh), and a later draw of the other kind ends it and begins one of its own kind.
+// The counters a mesh draw may count: VUID-vkCmdDrawMeshTasksEXT-pipelineStatistics-07076 leaves the input
+// assembly, vertex, geometry, tessellation and clipping bits out of the pipelineStatistics flags of every pool that
+// is active during a mesh draw, so a mesh segment runs in a pool with the fragment and compute counters only
+// (D3D-291). D3D12 counts the clipping invocations and primitives of a mesh pipeline, but Vulkan has no counter for
+// them during a mesh draw, so those two fields read 0.
+inline constexpr VkQueryPipelineStatisticFlags kMeshStatisticsFlags =
+    VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT | VK_QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_INVOCATIONS_BIT;
+// The bits the same VUID forbids in a pool that is active during a mesh draw.
+inline constexpr VkQueryPipelineStatisticFlags kForbiddenMeshStatisticsFlags =
+    VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT | VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_PRIMITIVES_BIT |
+    VK_QUERY_PIPELINE_STATISTIC_VERTEX_SHADER_INVOCATIONS_BIT | VK_QUERY_PIPELINE_STATISTIC_GEOMETRY_SHADER_INVOCATIONS_BIT |
+    VK_QUERY_PIPELINE_STATISTIC_GEOMETRY_SHADER_PRIMITIVES_BIT | VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT |
+    VK_QUERY_PIPELINE_STATISTIC_CLIPPING_PRIMITIVES_BIT |
+    VK_QUERY_PIPELINE_STATISTIC_TESSELLATION_CONTROL_SHADER_PATCHES_BIT |
+    VK_QUERY_PIPELINE_STATISTIC_TESSELLATION_EVALUATION_SHADER_INVOCATIONS_BIT;
+// A mesh draw cannot run while a query with the input-assembly, vertex, geometry, tessellation or clipping counters
+// is active (VUID-vkCmdDrawMeshTasksEXT-pipelineStatistics-07076), though D3D12 allows it and reads those fields as
+// 0. A query that holds a mesh draw is split as well (D3D-291): a segment's first draw decides whether it runs in
+// the full pool or in the mesh one (statistics_mesh), and a later draw of the other kind ends it and begins one of
+// its own kind.
 // Dispatches and segments without draws use the full pool; ExecuteIndirect draws count as vertex draws. Each draw
 // has its own rendering scope, so a split before one stays outside rendering, as a helper's does.
 inline void plan_statistics_segments(PreparedList& out) {
