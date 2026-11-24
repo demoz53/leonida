@@ -625,6 +625,10 @@ if(BUILD_TESTING)
     target_link_options(loader_test PRIVATE /OPT:NOREF ${GTA6RT_HOST_BASE})
     add_dependencies(loader_test gta6rt_tls_host)
     add_test(NAME loader COMMAND loader_test)
+    # It takes about 10 s under Wine and under a minute on a desktop with a virus scanner. Before #239 it waited on
+    # a "Bad Image" box on the Windows runner until the job's own timeout cancelled the whole job (every Windows
+    # run from 24 Nov 00:37 to 03:32 UTC); a hang like that now fails this test instead.
+    set_tests_properties(loader PROPERTIES TIMEOUT 180)
     # PE loader tests use two locally built fixtures: a DLL with exports, imports and relocations, and an EXE that
     # imports it so Loader::load exercises recursive module loading. They contain no game data.
     set(TINY_FIXTURE_DIR "${CMAKE_CURRENT_BINARY_DIR}/fixtures/$<CONFIG>")
