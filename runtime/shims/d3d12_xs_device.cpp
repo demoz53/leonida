@@ -2251,6 +2251,8 @@ ID3D12Device* device_proxy_real_device(const void* device) {
     return static_cast<const DeviceProxy*>(device)->real;
 }
 
+IUnknown* real_object_behind_proxy(const void* object) { return proxy_real_object(object); }
+
 bool device_slot_overridden(unsigned slot) {
     if (slot <= 2 || slot == 8 || slot == 9 || slot == 14 || slot == 25 || slot == 26 || slot == 31 || slot == 32 || slot == 34 || slot == 35 ||
         slot == 36 || slot == 45 || slot == 46 || slot == 50 || slot == 62 || slot == 67 ||
