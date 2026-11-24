@@ -28,6 +28,9 @@ import sys
 import time
 from typing import Callable, Optional, TextIO
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from report_paths import same_report_path  # noqa: E402
+
 CHUNK = 8 * 1024 * 1024
 DEFAULT_MANIFEST = os.path.join(os.path.dirname(__file__), "..", "reports", "manifest.json")
 CACHE_VERSION = 1
@@ -326,6 +329,8 @@ def verify_manifest(
     cache_path: Optional[str] = None,
 ) -> ManifestReport:
     """Verifies target_dir against manifest_path, optionally in parallel."""
+    if cache_path is not None and same_report_path(cache_path, manifest_path):
+        raise ManifestError(f"cache must not overwrite the manifest: {cache_path}")
     try:
         mode = os.stat(target_dir).st_mode
     except FileNotFoundError:

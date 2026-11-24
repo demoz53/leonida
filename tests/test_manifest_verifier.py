@@ -896,6 +896,58 @@ class TestVerifyCache(unittest.TestCase):
         with open(self.cache, encoding="utf-8") as f:
             return {os.path.basename(k) for k in json.load(f)["files"]}
 
+    def assert_manifest_cache_refused(self) -> None:
+        with open(self.manifest, "rb") as f:
+            before = f.read()
+        with patch.object(mv, "sha256_file", wraps=mv.sha256_file) as hashing:
+            with self.assertRaisesRegex(mv.ManifestError, "cache must not overwrite the manifest"):
+                self.verify()
+            hashing.assert_not_called()
+        with open(self.manifest, "rb") as f:
+            self.assertEqual(f.read(), before)
+        with open(self.cache, "rb") as f:
+            self.assertEqual(f.read(), before)
+        self.assertFalse(os.path.exists(self.cache + ".tmp"))
+
+    def test_cache_refuses_another_spelling_of_manifest(self) -> None:
+        self.cache = os.path.join(self.game, "..", "manifest.json")
+        self.assert_manifest_cache_refused()
+
+    def test_cache_refuses_manifest_hard_link(self) -> None:
+        try:
+            os.link(self.manifest, self.cache)
+        except OSError as err:
+            self.skipTest(f"hard links unavailable: {err}")
+        self.assert_manifest_cache_refused()
+
+    def test_cache_refuses_manifest_symlink(self) -> None:
+        try:
+            os.symlink(self.manifest, self.cache)
+        except OSError as err:
+            self.skipTest(f"symlinks unavailable: {err}")
+        self.assert_manifest_cache_refused()
+
+    def test_cache_refuses_manifest_case_alias_on_folding_volume(self) -> None:
+        self.cache = os.path.join(self.tmp.name, "MANIFEST.JSON")
+        if not os.path.exists(self.cache):
+            self.skipTest("volume is case-sensitive")
+        self.assert_manifest_cache_refused()
+
+    def test_cli_cache_equal_to_manifest_preserves_input(self) -> None:
+        with open(self.manifest, "rb") as f:
+            before = f.read()
+        result = subprocess.run(
+            [sys.executable, "-I", TOOL, self.game, "--manifest", self.manifest,
+             "--cache", self.manifest, "--json"],
+            capture_output=True, text=True, timeout=15,
+        )
+        with open(self.manifest, "rb") as f:
+            self.assertEqual(f.read(), before)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cache must not overwrite the manifest", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(result.stdout, "")
+
     def test_second_run_hashes_nothing(self) -> None:
         for jobs in (1, 4):
             with self.subTest(jobs=jobs):
