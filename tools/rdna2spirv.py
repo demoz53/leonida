@@ -5236,9 +5236,8 @@ class Gen:
                 for w in range(2):
                     self.dst({"k": "vgpr", "r": d["r"] + w, "n": 1}, olds[w])
         elif op in ("ds_mskor_b32", "ds_mskor_rtn_b32"):
-            # tmp = M[A]; M[A] = (tmp & ~DATA) | DATA2; the _rtn_ form returns tmp (RDNA2 ISA, DS). As two atomics:
-            # AND with ~DATA (its result is tmp, exactly), then OR with DATA2. The memory ends as the single op
-            # leaves it unless another lane's op on the same dword lands between the two; the returned value is exact.
+            # tmp = M[A]; M[A] = (tmp & ~DATA) | DATA2; the _rtn_ form returns tmp (RDNA2 ISA, DS). A CAS loop
+            # keeps the whole read/modify/write atomic: separate AND/OR atomics can interleave another lane's update.
             d, ad, msk, dat = (a[0], a[1], a[2], a[3]) if rtn else (None, a[0], a[1], a[2])
             addr = self.src_u(ad)
             inv = self.tmp()
@@ -5246,10 +5245,24 @@ class Gen:
             self.emit(f"{inv} = OpNot %uint {m_val}")
 
             def mskor(p):
-                old, _or = self.tmp(), self.tmp()
-                self.emit(f"{old} = OpAtomicAnd %uint {p} {sc} {sem} {inv}")
-                self.emit(f"{_or} = OpAtomicOr %uint {p} {sc} {sem} {d_val}")
-                return old
+                entry = self.current_label_placeholder()
+                lbl_hdr, lbl_cont, lbl_exit = (self.tmp() + t for t in ("_hdr", "_cont", "_exit"))
+                init = self.tmp()
+                self.emit(f"{init} = OpAtomicLoad %uint {p} {sc} {sem}")
+                self.emit(f"OpBranch {lbl_hdr}")
+                self.emit(f"{lbl_hdr} = OpLabel")
+                cur, masked, new, got, done = (self.tmp() for _ in range(5))
+                self.emit(f"{cur} = OpPhi %uint {init} {entry} {got} {lbl_cont}")
+                self.emit(f"{masked} = OpBitwiseAnd %uint {cur} {inv}")
+                self.emit(f"{new} = OpBitwiseOr %uint {masked} {d_val}")
+                self.emit(f"{got} = OpAtomicCompareExchange %uint {p} {sc} {sem} {sem} {new} {cur}")
+                self.emit(f"{done} = OpIEqual %bool {got} {cur}")
+                self.emit(f"OpLoopMerge {lbl_exit} {lbl_cont} None")
+                self.emit(f"OpBranchConditional {done} {lbl_exit} {lbl_cont}")
+                self.emit(f"{lbl_cont} = OpLabel")
+                self.emit(f"OpBranch {lbl_hdr}")
+                self.emit(f"{lbl_exit} = OpLabel")
+                return cur
             old = self.lds_access(addr, off, mskor)       # bounds-checked when lds_bound is set (SHADER-309)
             if d is not None:
                 self.dst(d, old)
