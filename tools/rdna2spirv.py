@@ -8003,9 +8003,9 @@ class Gen:
                     return [int(v) for v in body[:-1].split(",")]
                 except (IndexError, ValueError):
                     raise Unsupported(op + " modifiers") from None
-            if "clamp" in mods:
-                raise Unsupported(op + " clamp")
-            if (any(not m.startswith(("op_sel:", "op_sel_hi:", "neg_lo:", "neg_hi:")) for m in mods)
+            # VOP3P clamp on packed 16-bit shifts is a hardware no-op (measured natively on gfx1036:
+            # v_pk_lshlrev_b16/v_pk_lshrrev_b16/v_pk_ashrrev_i16 clamp wrap each 16-bit half without saturating).
+            if (any(m != "clamp" and not m.startswith(("op_sel:", "op_sel_hi:", "neg_lo:", "neg_hi:")) for m in mods)
                     or any(s.get("neg") or s.get("abs") for s in a)):
                 raise Unsupported(op + " modifiers")
             sel, selhi = bits("op_sel", [0, 0]), bits("op_sel_hi", [1, 1])

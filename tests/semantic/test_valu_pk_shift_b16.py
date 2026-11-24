@@ -206,11 +206,19 @@ class PkShiftB16Tests(unittest.TestCase):
                     got = run_shift(line, push=[sh, val])
                     self.assertEqual(got, ref_pk_shift(op, sh, val, tuple(sel), tuple(selhi)))
 
+    def test_clamp_is_hardware_noop(self):
+        # Measured natively on AMD RDNA2 (gfx1036): VOP3P clamp on packed 16-bit shifts wraps without saturating.
+        for op, sh, val in (
+            ("v_pk_lshlrev_b16", 0x00040004, 0x12345678),
+            ("v_pk_lshrrev_b16", 0x00040004, 0x12345678),
+            ("v_pk_ashrrev_i16", 0x00040004, 0x80007FFF),
+        ):
+            with self.subTest(op=op):
+                got = run_shift(f"{op} v0, v1, v2 clamp", push=[sh, val])
+                self.assertEqual(got, ref_pk_shift(op, sh, val))
+
     def test_rejected_modifiers(self):
         bad_lines = (
-            "v_pk_lshlrev_b16 v0, v1, v2 clamp",
-            "v_pk_lshrrev_b16 v0, v1, v2 clamp",
-            "v_pk_ashrrev_i16 v0, v1, v2 clamp",
             "v_pk_lshlrev_b16 v0, v1, v2 neg_lo:[1,0]",
             "v_pk_lshrrev_b16 v0, v1, v2 neg_lo:[0,1]",
             "v_pk_ashrrev_i16 v0, v1, v2 neg_hi:[1,0]",
