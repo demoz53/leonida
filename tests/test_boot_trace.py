@@ -533,6 +533,7 @@ class BootTraceTests(unittest.TestCase):
         for needle in (
             "pid 123",
             "modules (2)",
+            "game.exe, x.dll (relocated)",
             "dllmain: 1 ok, 1 failed",
             "unimplemented: 2 unique",
             "x.dll!Foo from game.exe+0x10",

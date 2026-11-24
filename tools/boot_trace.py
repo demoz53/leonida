@@ -278,7 +278,8 @@ def format_text(summary: dict, limit: int) -> str:
             kinds = ", ".join(f"{k} {v}" for k, v in sorted(startup["kinds"].items()))
             out.append(f"  kinds: {kinds}")
         if startup["modules"]:
-            names = [m["module"] for m in startup["modules"]]
+            # A relocated module is marked: triage step 1 asks whether the executable sits at its preferred base.
+            names = [m["module"] + (" (relocated)" if m.get("relocated") else "") for m in startup["modules"]]
             out.append(f"  modules ({len(names)}): {_tail(names, limit)}")
         out.append(f"  tls callbacks: {startup['tls_callbacks']}")
         if callback := startup.get("last_tls_callback"):
