@@ -110,6 +110,7 @@ if(WIN32 AND LEONIDA_BUILD_WINDOWS_RUNTIME)
     src/main.cpp
     src/host_cpu.cpp
     src/pe_loader.cpp
+    src/xma2_decoder.cpp
     shims/registry.cpp
     shims/file_system.cpp
     shims/winhttp_offline.cpp
@@ -245,9 +246,10 @@ if(WIN32 AND LEONIDA_BUILD_WINDOWS_RUNTIME)
   add_executable(acphal_test
     test/acphal_test.cpp
     shims/acphal.cpp
+    src/xma2_decoder.cpp
     shims/registry.cpp
   )
-  target_include_directories(acphal_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shims)
+  target_include_directories(acphal_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shims ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_compile_definitions(acphal_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_compile_options(acphal_test PRIVATE /W4 /permissive- /utf-8)
   target_link_options(acphal_test PRIVATE /OPT:NOREF)
@@ -580,6 +582,13 @@ if(BUILD_TESTING)
   add_test(NAME vulkan_device_filter COMMAND vulkan_device_filter_test)
   add_executable(vk_presenter_capture_colour_test test/vk_presenter_capture_colour_test.cpp)
   add_test(NAME vk_presenter_capture_colour COMMAND vk_presenter_capture_colour_test)
+  # Portable XMA2 packet parser and WMA Pro frame decoder (src/xma2_decoder.cpp): pure stdlib, no GPU.
+  add_executable(xma2_decoder_test test/xma2_decoder_test.cpp src/xma2_decoder.cpp)
+  target_include_directories(xma2_decoder_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  if(MSVC)
+    target_compile_options(xma2_decoder_test PRIVATE /W4 /permissive- /utf-8)
+  endif()
+  add_test(NAME xma2_decoder COMMAND xma2_decoder_test)
   if(TARGET gta6rt)
     if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
       add_executable(cpp_unwind_test test/cpp_unwind_test.cpp)

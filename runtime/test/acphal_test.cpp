@@ -6,10 +6,13 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <thread>
+#include <vector>
 
 #include "shims.h"
 
@@ -261,6 +264,245 @@ int main() {
     for (unsigned char b : stale_rcx) untouched = untouched && b == 0xAA;
     check(untouched, "AcpHalReleaseShapeContexts writes nothing through its (absent) argument");
     check(release_ctx(nullptr) == S_OK, "AcpHalReleaseShapeContexts again succeeds");
+
+    // 7. ACP command/message queue protocol (register, complete, overflow drops, disconnect, notify word)
+    {
+        #pragma pack(push, 1)
+        struct TestAcpMessage {
+            uint32_t kind;
+            uint32_t dropped;
+            uint32_t usec;
+            uint8_t data[16];
+        };
+        #pragma pack(pop)
+        static_assert(sizeof(TestAcpMessage) == 28, "ACP message is 28 bytes");
+
+        using ConnectFn = HRESULT(__stdcall*)(void*, uint32_t, uint32_t);
+        using DisconnectFn = HRESULT(__stdcall*)(void*);
+        using SubmitFn = HRESULT(__stdcall*)(void*, uint32_t, uint64_t, uint32_t, const void*, uint32_t);
+        using PopFn = uint32_t(__stdcall*)(void*, TestAcpMessage*);
+        using CountFn = uint32_t(__stdcall*)(void*);
+        using ReleaseFn = HRESULT(__stdcall*)(void*);
+
+        void* q_acp = nullptr;
+        check(create(&q_acp) == S_OK && q_acp != nullptr, "AcpHalCreate for queue test");
+        auto vt = *static_cast<void* const* const*>(q_acp);
+        const auto fn_connect = reinterpret_cast<ConnectFn>(vt[0]);
+        const auto fn_disconnect = reinterpret_cast<DisconnectFn>(vt[1]);
+        const auto fn_submit = reinterpret_cast<SubmitFn>(vt[2]);
+        const auto fn_pop = reinterpret_cast<PopFn>(vt[3]);
+        const auto fn_count = reinterpret_cast<CountFn>(vt[4]);
+        const auto fn_release = reinterpret_cast<ReleaseFn>(vt[5]);
+
+        check(fn_connect(q_acp, 0, 16) == E_INVALIDARG, "Connect(commands=0) returns E_INVALIDARG");
+        check(fn_disconnect(q_acp) == E_FAIL, "Disconnect before Connect returns E_FAIL");
+        check(fn_connect(q_acp, 16, 2) == S_OK, "Connect(16, 2) succeeds");
+
+        // Allocate a 4-byte notification word in APU memory.
+        void* notify_va = nullptr;
+        uint32_t notify_apu = 0;
+        check(alloc(&notify_va, &notify_apu, 16, 16, 1) == S_OK && notify_va != nullptr,
+              "ApuAlloc notification word succeeds");
+        *static_cast<uint32_t*>(notify_va) = 0;
+
+        const uint32_t reg_mask = 0x92u;  // FLOWGRAPH_COMPLETED(0x02) | COMMAND_COMPLETED(0x10) | DISCONNECTED(0x80)
+        check(fn_submit(q_acp, 2, 0x1122334455667788ull, 0xffffffffu, &reg_mask, notify_apu) == S_OK,
+              "REGISTER_MESSAGES with id and notify word succeeds");
+        check(*static_cast<volatile uint32_t*>(notify_va) == 1u,
+              "SubmitCommand writes 1 to APU notification word");
+        check(fn_count(q_acp) == 1u, "COMMAND_COMPLETED queued after REGISTER_MESSAGES");
+
+        TestAcpMessage msg{};
+        check(fn_pop(q_acp, &msg) == 1u, "PopMessage retrieves COMMAND_COMPLETED");
+        uint32_t ack_cmd = 0;
+        uint64_t ack_id = 0;
+        std::memcpy(&ack_cmd, msg.data, 4);
+        std::memcpy(&ack_id, msg.data + 4, 8);
+        check(msg.kind == 0x10u && msg.dropped == 0u && ack_cmd == 2u && ack_id == 0x1122334455667788ull,
+              "COMMAND_COMPLETED payload carries command id and 64-bit token");
+
+        // Overflow queue of capacity 2 with 4 commands -> 2 dropped, reported on the 5th.
+        for (uint64_t tok = 1; tok <= 4; ++tok) {
+            check(fn_submit(q_acp, 12, tok, 0xffffffffu, nullptr, 0) == S_OK,
+                  "SubmitCommand during overflow succeeds");
+        }
+        check(fn_count(q_acp) == 2u, "Message queue caps at capacity 2");
+        check(fn_pop(q_acp, &msg) == 1u && fn_pop(q_acp, &msg) == 1u,
+              "Drained the 2 queued messages");
+        check(fn_submit(q_acp, 12, 5, 0xffffffffu, nullptr, 0) == S_OK,
+              "SubmitCommand 5 after drain succeeds");
+        check(fn_pop(q_acp, &msg) == 1u && msg.dropped == 2u,
+              "Next queued message reports dropped == 2");
+
+        // LOAD_FLOWGRAPH posts FLOWGRAPH_COMPLETED carrying word(1).
+        const uint32_t fg_cfg[2] = {0, 0x42u};
+        check(fn_submit(q_acp, 1, 0, 0xffffffffu, fg_cfg, 0) == S_OK, "LOAD_FLOWGRAPH succeeds");
+        check(fn_pop(q_acp, &msg) == 1u && msg.kind == 0x02u, "FLOWGRAPH_COMPLETED queued");
+        uint32_t fg_id = 0;
+        std::memcpy(&fg_id, msg.data, 4);
+        check(fg_id == 0x42u, "FLOWGRAPH_COMPLETED carries flowgraph word");
+
+        // Disconnect posts DISCONNECTED.
+        check(fn_disconnect(q_acp) == S_OK, "Disconnect succeeds when connected");
+        check(fn_count(q_acp) == 1u, "Disconnect queued DISCONNECTED message");
+        check(fn_pop(q_acp, &msg) == 1u && msg.kind == 0x80u, "Popped DISCONNECTED message");
+
+        free_mem(notify_va);
+        check(fn_release(q_acp) == S_OK, "Release queue AcpHal succeeds");
+    }
+
+    // 8. End-to-end XMA2 context ring decoding via background decoder thread
+    {
+        // Build a 2-packet XMA2 buffer with 3 silent mono frames per packet (6 frames total).
+        std::vector<uint8_t> stream(2 * 2048, 0xFFu);
+        auto put_bits = [&](size_t at, uint32_t value, size_t width) {
+            for (size_t i = 0; i < width; ++i) {
+                const size_t p = at + i;
+                const uint32_t bit = (value >> (width - 1 - i)) & 1u;
+                stream[p / 8] = static_cast<uint8_t>(
+                    (stream[p / 8] & ~(0x80u >> (p % 8))) |
+                    (bit << (7 - (p % 8))));
+            }
+        };
+        for (size_t packet = 0; packet < 2; ++packet) {
+            const size_t base = packet * 2048 * 8;
+            put_bits(base, 3u << 26, 32);  // 3 frames, first_frame_bit = 0, skip = 0
+            for (size_t f = 0; f < 3; ++f) {
+                const size_t at = base + 32 + f * 31;
+                put_bits(at, 31, 15);        // frame length
+                put_bits(at + 15, 0b10u, 2); // fixed layout, one 512-sample subframe
+                put_bits(at + 17, 0, 14);    // gain(8) + trim(1) + subframe_skip/empty(5)
+            }
+        }
+
+        TestShapeContexts xma_ctx{};
+        xma_ctx.numXmaContexts = 4;
+        check(alloc_ctx(&xma_ctx) == S_OK && xma_ctx.xmaContextArray != nullptr,
+              "Allocate 4 XMA SHAPE contexts");
+
+        void* in_va = nullptr;
+        uint32_t in_apu = 0;
+        check(alloc(&in_va, &in_apu, 0x1000, 0x800, 1) == S_OK && in_va != nullptr,
+              "ApuAlloc 2-packet XMA2 input buffer");
+        std::memcpy(in_va, stream.data(), stream.size());
+
+        void* out_va = nullptr;
+        uint32_t out_apu = 0;
+        check(alloc(&out_va, &out_apu, 0x400, 0x100, 2) == S_OK && out_va != nullptr,
+              "ApuAlloc 4-block XMA2 output ring");
+        std::memset(out_va, 0x55, 0x400);
+
+        // Configure voice index 1: 2 packets in input 0, input 0 valid, 4 output blocks,
+        // writable = 1, 48 kHz mono, read_bit = 32.
+        auto* words = static_cast<volatile uint32_t*>(xma_ctx.xmaContextArray) + 16;
+        words[0] = 2u | (1u << 20) | (4u << 22);
+        words[1] = (1u << 31) | (3u << 27);
+        words[2] = 32u;
+        words[5] = in_apu;
+        words[7] = out_apu;
+
+        using ConnectFn = HRESULT(__stdcall*)(void*, uint32_t, uint32_t);
+        using SubmitFn = HRESULT(__stdcall*)(void*, uint32_t, uint64_t, uint32_t, const void*, uint32_t);
+        using ReleaseFn = HRESULT(__stdcall*)(void*);
+
+        void* x_acp = nullptr;
+        check(create(&x_acp) == S_OK && x_acp != nullptr, "AcpHalCreate for XMA decode test");
+        auto vt = *static_cast<void* const* const*>(x_acp);
+        const auto fn_connect = reinterpret_cast<ConnectFn>(vt[0]);
+        const auto fn_submit = reinterpret_cast<SubmitFn>(vt[2]);
+        const auto fn_release = reinterpret_cast<ReleaseFn>(vt[5]);
+
+        check(fn_connect(x_acp, 0x1000, 0x1000) == S_OK, "Connect for XMA decode test");
+
+        // ENABLE_XMA (cmd 5) on voice 1.
+        const uint32_t enable_arg = 1u;
+        check(fn_submit(x_acp, 5, 0xf1, 0xffffffffu, &enable_arg, 0) == S_OK,
+              "ENABLE_XMA voice 1 succeeds");
+
+        // Wait up to 500 ms for the background decoder thread to fill the 4-block ring.
+        for (int wait = 0; wait < 500 && ((words[1] >> 31) & 1u) == 1u; ++wait) {
+            Sleep(1);
+        }
+        check(((words[1] >> 31) & 1u) == 0u,
+              "Background XMA2 decoder fills ring and clears writable flag");
+        check(((words[0] >> 27) & 0x1Fu) == 0u,
+              "Write block wrapped back to 0 after filling 4 blocks");
+
+        bool ring_zeroed = true;
+        const auto* ring_bytes = static_cast<const uint8_t*>(out_va);
+        for (size_t i = 0; i < 0x400; ++i) {
+            if (ring_bytes[i] != 0) {
+                ring_zeroed = false;
+                break;
+            }
+        }
+        check(ring_zeroed, "Decoded silent PCM overwrote sentinel bytes across all 4 ring blocks");
+
+        // Advance read pointer 4 blocks at a time until input exhausts and INPUT_INVALID fires.
+        const uint32_t advance_args[2] = {1u, 4u};
+        for (int step = 0; step < 20; ++step) {
+            check(fn_submit(x_acp, 18, 0xf2 + static_cast<uint64_t>(step),
+                            0xffffffffu, advance_args, 0) == S_OK,
+                  "ADVANCE_XMA_READ succeeds");
+            // Wait until either ring fills again (writable == 0) or stream hits error bit.
+            for (int wait = 0; wait < 200; ++wait) {
+                const uint32_t w1 = words[1];
+                const uint32_t w2 = words[2];
+                if (((w1 >> 31) & 1u) == 0u || ((w2 >> 31) & 1u) == 1u) break;
+                Sleep(1);
+            }
+            if (((words[2] >> 31) & 1u) == 1u && ((words[1] >> 31) & 1u) == 1u) {
+                break;
+            }
+        }
+        check(((words[0] >> 20) & 3u) == 0u, "XMA input buffer valid bits cleared on exhaustion");
+        check(((words[2] >> 31) & 1u) == 1u, "XMA error flag set on exhaustion");
+        check(((words[2] >> 26) & 0x1Fu) == 4u, "XMA error status is INPUT_INVALID (4)");
+
+        // DISABLE_XMA (cmd 7) on voice 1.
+        const uint32_t disable_arg = 1u;
+        check(fn_submit(x_acp, 7, 0xf9, 0xffffffffu, &disable_arg, 0) == S_OK,
+              "DISABLE_XMA voice 1 succeeds");
+        check(fn_release(x_acp) == S_OK, "Release XMA AcpHal succeeds");
+        free_mem(in_va);
+        free_mem(out_va);
+        check(release_ctx(&xma_ctx) == S_OK, "Release XMA SHAPE contexts joins decoder cleanly");
+    }
+
+    // 9. ENABLE_XMA (starts/wakes the decoder worker) racing bind/release (stops it).
+    //    Every release must return; a lost stop would hang this block.
+    {
+        using RaceConnectFn = HRESULT(__stdcall*)(void*, uint32_t, uint32_t);
+        using RaceSubmitFn = HRESULT(__stdcall*)(void*, uint32_t, uint64_t, uint32_t, const void*, uint32_t);
+        using RaceReleaseFn = HRESULT(__stdcall*)(void*);
+
+        void* race_acp = nullptr;
+        check(create(&race_acp) == S_OK && race_acp != nullptr, "AcpHalCreate for XMA race test");
+        auto race_vt = *static_cast<void* const* const*>(race_acp);
+        const auto race_connect = reinterpret_cast<RaceConnectFn>(race_vt[0]);
+        const auto race_submit = reinterpret_cast<RaceSubmitFn>(race_vt[2]);
+        const auto race_release = reinterpret_cast<RaceReleaseFn>(race_vt[5]);
+        check(race_connect(race_acp, 0x1000, 0x1000) == S_OK, "Connect for XMA race test");
+
+        constexpr int kRaceIterations = 20000;
+        std::atomic<int> bind_failures{0};
+        std::thread enabler([&]() {
+            const uint32_t enable_arg = 1u;
+            for (int i = 0; i < kRaceIterations; ++i) {
+                race_submit(race_acp, 5, 0xe000u + static_cast<uint64_t>(i), 0xffffffffu,
+                            &enable_arg, 0);
+            }
+        });
+        for (int i = 0; i < kRaceIterations; ++i) {
+            TestShapeContexts race_ctx{};
+            race_ctx.numXmaContexts = 4;
+            if (alloc_ctx(&race_ctx) != S_OK) ++bind_failures;
+            if (release_ctx(&race_ctx) != S_OK) ++bind_failures;
+        }
+        enabler.join();
+        check(bind_failures == 0, "20000 bind/release cycles race ENABLE_XMA without hanging");
+        check(race_release(race_acp) == S_OK, "Release race AcpHal succeeds");
+    }
 
     std::printf("acphal_test complete: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;
