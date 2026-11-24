@@ -7970,7 +7970,10 @@ class Gen:
             self.emit(f"{p1} = OpFMul %float {a1} {b1}")
             self.emit(f"{s} = OpFAdd %float {p0} {p1}")
             self.emit(f"{r} = OpFAdd %float {s} {acc}")
-            r = self.clamp_mods(r, ["clamp"] if "clamp" in mods else [])
+            # Measured natively on AMD RDNA2 (gfx1036 across all ieee/dx10_clamp/denorm MODEs):
+            # VOP3P v_dot2_f32_f16 ignores its clamp bit (hardware no-op: +3.0, -3.0, +inf, NaN stay unclamped).
+            if op == "v_dot2c_f32_f16" and "clamp" in mods:
+                r = self.clamp_mods(r, ["clamp"])
             self.dst(a[0], self.tou(r))
         elif op in ("v_pk_lshlrev_b16", "v_pk_lshrrev_b16", "v_pk_ashrrev_i16"):
             # Packed 16-bit shifts (VOP3P): result half h = src1 half (op_sel / op_sel_hi) shifted by src0 half & 15.
