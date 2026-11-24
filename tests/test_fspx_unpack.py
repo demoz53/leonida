@@ -144,6 +144,16 @@ class Kind0AndCode(unittest.TestCase):
         self.assertEqual(fspx_unpack.code_range(program(with_prologue=False)), (0, 12 + 4))
         self.assertEqual(fspx_unpack.code_range(program(endpgm=False))[1], None)
 
+    def test_short_prologue(self):
+        # Two VOP3 opcode-0x180 words (0 and 3), then code: the 24-byte prologue of some pipeline-library programs.
+        code = prologue()[:24] + V_MOV * 3 + ENDPGM
+        self.assertEqual(fspx_unpack.code_range(code), (24, 24 + 12 + 4))
+        # Only word 0 is not a prologue.
+        code = prologue()[:12] + V_MOV * 6 + ENDPGM
+        self.assertEqual(fspx_unpack.code_range(code)[0], 0)
+        # The long one still wins when word 6 is a prologue word too.
+        self.assertEqual(fspx_unpack.code_range(program())[0], 36)
+
     def test_unaligned_endpgm_bytes_are_not_the_end(self):
         code = prologue() + b"\0\0" + ENDPGM + b"\0\0" + V_MOV + ENDPGM
         start, end = fspx_unpack.code_range(code)

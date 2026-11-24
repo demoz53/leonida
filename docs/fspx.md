@@ -136,6 +136,12 @@ program whose kind 0 is too short for word 4 keeps the code heuristic.
     SGPRs (`s[0:1]`, `s4`..`s15`), `M0`, `VCC`, `EXEC` (including inactive lanes across 64 threads) and `SCC` (both 0
     and 1) unchanged, and execution resumes cleanly at `+36` bytes. So they are hardware no-ops on RDNA2.
   - `tools/fspx_unpack.py` disassembles from the end of the prologue.
+  - **A 24-byte variant**: some programs of the pipeline library in `shaders.rpf` (`tools/shader_library.py`) carry
+    only the first two of those words, at words 0 and 3, and their code starts at word 6 (`s_inst_prefetch` in all of
+    them). Counted on the 1.0.2.1 library: 50 of 2,684 programs; read from word 0 they never decode (the prologue
+    words are invalid encodings and the rest desyncs), and only 1 of the 50 translated. With `code_range` taking
+    the 24-byte form, all 50 disassemble with 0 invalid words and 49 translate and pass `spirv-val` (the other one
+    stops at `s_sethalt`). A program whose words 0, 3 and 6 are all prologue words still takes the 36-byte form.
 - **Target.** The programs use `v_dot4_i32_i8` (1,458 times) and `v_dot4c_i32_i8` (25,813 times), which fits the
   provider's name (`FSR4_Int8`). `llvm-mc` (LLVM 23.1.5) decodes them for `gfx1011`, `gfx1012`, `gfx1030`, `gfx1031`,
   `gfx1033`, `gfx1034` and `gfx1036`, but not for `gfx1010`, `gfx1013` (the target `shader_disasm.py` uses for the

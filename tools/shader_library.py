@@ -354,7 +354,7 @@ def main(argv=None) -> int:
         code = program(b, lib, i)
         start, end = code_range(code)
         meta = {"program": i, "stage": st, "offset": lib["programs"][i][0], "size": len(code),
-                "code": {"start": start, "end": end, "prologue": start == fspx_unpack.PROLOGUE_SIZE}}
+                "code": {"start": start, "end": end, "prologue": start > 0}}
         state = blob(b, lib, cs_state[i]) if i in cs_state else None
         if state is not None:
             meta.update(fspx_unpack.decode_kind0(state))
