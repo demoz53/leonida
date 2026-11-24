@@ -11433,6 +11433,35 @@ class Gen:
             self.emit(f"{sh} = OpShiftLeftLogical %uint {halves[1]} {self.cu(16)}")
             self.emit(f"{r} = OpBitwiseOr %uint {halves[0]} {sh}")
             self.dst(a[0], r)
+        elif op == "v_sat_pk_u8_i16":
+            # D.b16 = {sat_u8(S0.i16 hi), sat_u8(S0.i16 lo)}: each signed 16-bit lane of S0 saturates to
+            # an unsigned byte and packs into the low 16 bits of D (AMD machine-readable ISA semantics).
+            # On GFX10 the 16-bit result keeps the destination's high half, as v_cvt_f16_f32 (Mesa ACO
+            # instr_is_16bit); under _sdwa the dst_sel/dst_unused rule decides instead. neg/abs on the
+            # integer source, clamp and omod are refused rather than guessed.
+            if a[1].get("neg") or a[1].get("abs"):
+                raise Unsupported(op + " modifiers")
+            if ins["op"].endswith("_sdwa"):
+                bad_mod = any(
+                    m.split(":", 1)[0] not in ("src0_sel", "dst_sel", "dst_unused") for m in mods)
+            elif ins["op"].endswith("_dpp"):
+                bad_mod = bool(self.non_dpp_mods(ins["op"], mods))
+            else:
+                bad_mod = bool(mods)
+            if bad_mod:
+                raise Unsupported(op + " modifiers")
+            x = self.src_u(a[1])
+            bytes_ = []
+            for half in range(2):
+                s, b = self.tmp(), self.tmp()
+                self.emit(f"{s} = OpExtInst %int %glsl SClamp {self.i16_half(x, half)} "
+                          f"{self.as_int(self.cu(0))} {self.as_int(self.cu(0xFF))}")
+                self.emit(f"{b} = OpBitcast %uint {s}")
+                bytes_.append(b)
+            sh, r = self.tmp(), self.tmp()
+            self.emit(f"{sh} = OpShiftLeftLogical %uint {bytes_[1]} {self.cu(8)}")
+            self.emit(f"{r} = OpBitwiseOr %uint {bytes_[0]} {sh}")
+            self.write_lo16(a[0], r)
         elif op in ("v_cvt_pknorm_i16_f32", "v_cvt_pknorm_u16_f32"):
             # D = {norm16(S1), norm16(S0)}: each f32 clamped to [-1, 1] (i16) or [0, 1] (u16), scaled by 32767 or
             # 65535 and rounded to nearest even. Mesa ACO emits these for NIR pack_snorm_2x16 / pack_unorm_2x16,
