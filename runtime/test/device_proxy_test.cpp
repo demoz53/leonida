@@ -23,8 +23,10 @@
 #include <wrl/client.h>
 
 #include "d3d12_trace.h"
+#include "d3d12_xs_desc_clean.h"
 #include "d3d12_xs_device.h"
 #include "shims.h"
+#include "../src/frame_pacer.h"
 
 namespace {
 
@@ -238,6 +240,44 @@ int main(int argc, char** argv) {
         const D3D12_RESOURCE_ALLOCATION_INFO pc_info = device->GetResourceAllocationInfo(0, 1, &desc);
         check(pc_info.SizeInBytes == want.SizeInBytes && pc_info.Alignment == want.Alignment,
               "slot 25 still answers the PC (C++) form");
+
+        // A console depth-stencil texture that allows unordered access too, as a title sizes one: a 2D
+        // R32G8X24_TYPELESS texture with ALLOW_DEPTH_STENCIL | ALLOW_UNORDERED_ACCESS and the console layout word. The
+        // PC device refuses the flag pair (negative control); slot 25 sizes it as the depth-stencil texture alone.
+        D3D12_RESOURCE_DESC ds_uav{};
+        ds_uav.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        ds_uav.Width = 2560;
+        ds_uav.Height = 1440;
+        ds_uav.DepthOrArraySize = 1;
+        ds_uav.MipLevels = 1;
+        ds_uav.Format = DXGI_FORMAT_R32G8X24_TYPELESS;
+        ds_uav.SampleDesc.Count = 1;
+        ds_uav.Layout = static_cast<D3D12_TEXTURE_LAYOUT>(0x101);
+        ds_uav.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        D3D12_RESOURCE_DESC pc_pair = ds_uav;
+        pc_pair.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        check(real->GetResourceAllocationInfo(0, 1, &pc_pair).SizeInBytes == UINT64_MAX,
+              "the PC device refuses a depth-stencil texture with unordered access (negative control)");
+        D3D12_RESOURCE_DESC ds_only = pc_pair;
+        ds_only.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+        const D3D12_RESOURCE_ALLOCATION_INFO ds_want = real->GetResourceAllocationInfo(0, 1, &ds_only);
+        check(ds_want.SizeInBytes != UINT64_MAX, "WARP sizes the depth-stencil texture without unordered access");
+        const D3D12_RESOURCE_DESC ds_clean = rt::d3d12_xs::pc_resource_desc(ds_uav);
+        check(ds_clean.Flags == D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
+              "pc_resource_desc drops unordered access from a depth-stencil texture");
+        D3D12_RESOURCE_DESC uav_buffer = buffer_desc();
+        uav_buffer.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        D3D12_RESOURCE_DESC rt_uav = ds_only;
+        rt_uav.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        rt_uav.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        check(rt::d3d12_xs::pc_resource_desc(uav_buffer).Flags == D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS &&
+                  rt::d3d12_xs::pc_resource_desc(rt_uav).Flags == rt_uav.Flags,
+              "pc_resource_desc keeps unordered access on buffers and color textures");
+        D3D12_RESOURCE_ALLOCATION_INFO ds_got{~0ull, ~0ull};
+        get_alloc_info(&ds_got, device.Get(), 0, 1, &ds_uav);
+        check(ds_got.SizeInBytes != UINT64_MAX && ds_got.SizeInBytes >= ds_want.SizeInBytes &&
+                  (ds_got.SizeInBytes >> 32) == 0,
+              "slot 25 (C ABI) sizes a console depth-stencil texture with unordered access");
     }
 
     D3D12_RESOURCE_DESC reserved_desc = buffer_desc();
@@ -428,6 +468,10 @@ int main(int argc, char** argv) {
         check(hr == S_OK && token2 != 0 && token2 != token, "slot 80 returns a fresh token on the next wait");
         hr = reinterpret_cast<WaitFrameEventFn>(proxy_vtbl[80])(device.Get(), 0, 0, nullptr, 0, nullptr);
         check(hr == E_POINTER, "slot 80 refuses a null token with E_POINTER");
+        const auto tokens = rt::d3d12_xs::device_frame_tokens(device.Get());
+        check(tokens && tokens->issued() == token2 && token2 == token + 1,
+              "slot 80 tokens come from the device's frame token source");
+        check(!rt::d3d12_xs::device_frame_tokens(nullptr), "a non-proxy has no frame token source");
         check(rt::d3d12_xs::device_slot_hits(78) == 1 && rt::d3d12_xs::device_slot_hits(79) == 1 &&
                   rt::d3d12_xs::device_slot_hits(80) == 3,
               "slots 78/79/80 hit counters are 1/1/3");
@@ -575,6 +619,71 @@ int main(int argc, char** argv) {
             check(SUCCEEDED(queue->GetDevice(IID_PPV_ARGS(owner.GetAddressOf()))) && owner.Get() == device.Get(),
                   "the queue proxy's GetDevice is the device the shim returned");
         }
+    }
+
+    // Title-exported __XMemAllocationHooks__ backing for CreateDescriptorHeap (slot 14) + CPU handle translation
+    // against the real WARP D3D12 runtime.
+    {
+        struct HookState {
+            alignas(64) std::uint8_t backing[4096]{};
+            std::size_t alloc_size = 0;
+            std::uint64_t alloc_attr = 0;
+            void* freed_ptr = nullptr;
+            std::uint64_t freed_attr = 0;
+            int alloc_count = 0;
+            int free_count = 0;
+        };
+        static HookState hook_state;
+        hook_state = {};
+        struct HookCallbacks {
+            static void* __stdcall alloc(std::size_t size, std::uint64_t attr) {
+                ++hook_state.alloc_count;
+                hook_state.alloc_size = size;
+                hook_state.alloc_attr = attr;
+                if ((attr & 0x3FFFull) == 4 && size <= sizeof(hook_state.backing)) return hook_state.backing;
+                return nullptr;
+            }
+            static void __stdcall free(void* ptr, std::uint64_t attr) {
+                ++hook_state.free_count;
+                hook_state.freed_ptr = ptr;
+                hook_state.freed_attr = attr;
+            }
+        };
+        const rt::shims::XMemAllocationHooks title_hooks{&HookCallbacks::alloc, &HookCallbacks::free};
+        rt::shims::add_xmem_allocation_hooks(&title_hooks, &title_hooks);
+
+        D3D12_DESCRIPTOR_HEAP_DESC hooked_desc{};
+        hooked_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        hooked_desc.NumDescriptors = 4;
+        hooked_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        const UINT inc = device->GetDescriptorHandleIncrementSize(hooked_desc.Type);
+        ComPtr<ID3D12DescriptorHeap> hooked_heap;
+        hr = device->CreateDescriptorHeap(&hooked_desc, IID_PPV_ARGS(hooked_heap.GetAddressOf()));
+        check(SUCCEEDED(hr) && hooked_heap != nullptr, "hooked slot 14 creates a descriptor heap");
+        check(hook_state.alloc_count == 1 && hook_state.alloc_size == hooked_desc.NumDescriptors * inc &&
+                  hook_state.alloc_attr == rt::d3d12_xs::kXmemDescriptorHeapAttributes,
+              "slot 14 invokes __XMemAllocationHooks__ with heap byte size and D3D descriptor-heap attributes");
+        if (hooked_heap) {
+            void** hooked_vtbl = *reinterpret_cast<void***>(hooked_heap.Get());
+            const auto hooked_cpu = reinterpret_cast<GetCpuHandleFn>(hooked_vtbl[9])(hooked_heap.Get());
+            const auto hooked_gpu = reinterpret_cast<GetGpuHandleFn>(hooked_vtbl[10])(hooked_heap.Get());
+            const auto expected_base = reinterpret_cast<SIZE_T>(hook_state.backing);
+            check(hooked_cpu.ptr == expected_base,
+                  "hooked heap slot 9 returns the title-supplied CPU descriptor base");
+            check(hooked_gpu.ptr != 0, "hooked heap slot 10 returns a valid GPU descriptor start");
+
+            // Create a CBV at slot 1 of the title-backed heap; WARP validates the translated real handle.
+            D3D12_CONSTANT_BUFFER_VIEW_DESC cbv{};
+            cbv.BufferLocation = 0;
+            cbv.SizeInBytes = 256;
+            device->CreateConstantBufferView(&cbv, D3D12_CPU_DESCRIPTOR_HANDLE{expected_base + inc});
+            check(true, "CreateConstantBufferView translates a title-backed CPU descriptor handle on WARP");
+        }
+        hooked_heap.Reset();
+        check(hook_state.free_count == 1 && hook_state.freed_ptr == hook_state.backing &&
+                  hook_state.freed_attr == rt::d3d12_xs::kXmemDescriptorHeapAttributes,
+              "releasing the hooked heap frees its backing through __XMemAllocationHooks__");
+        rt::shims::remove_xmem_allocation_hooks(&title_hooks);
     }
 
     // Hold a reference to the PC device so the final check can prove the proxy's Release balances its own.

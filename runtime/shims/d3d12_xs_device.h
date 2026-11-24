@@ -6,6 +6,10 @@
 //             the device in RCX and the buffer in RDX. The thunk takes the console form when RDX holds a device
 //             proxy, and forwards the PC form otherwise. Slots 25 and 43 return structs too; no call of them by
 //             the executable has been seen yet, so they are forwarded in the PC form.
+//   slot 41   CreateCommandSignature at its PC position; a console argument of type 105 (a 12-byte dispatch, read
+//             from the retail title's call sites) is created as D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH.
+//   slot 61   CreateSamplerX(desc, dest) -> PC CreateSampler (slot 22); the description's PC
+//             D3D12_SAMPLER_DESC prefix is passed. The PC slot 61 is CreateMetaCommand. Measured on the retail title's boot.
 //   slot 62   CreateComputePipelineState(desc, w2, w3, iid, out): two words (0 from XboxBvhBuilder, meaning unknown)
 //             before the IID. The PC slot 62 is CreateStateObject.
 //   slot 67   CreateComputePipelineState from native code (desc, iid, out): converts the Xbox native-code desc
@@ -15,6 +19,8 @@
 //             and a GPU address, with no resource (retail boot chain stop 14). The PC slot 70 is CreatePlacedResource1.
 //             The words are not measured, so the destination gets the PC null view (PC CreateShaderResourceView
 //             with no resource) and the call returns.
+//   slot 74   (pointer, u32, pointer): not measured, returns S_OK. The PC slot 74 is ShaderCacheControl(kinds, control),
+//             which reads the first word as flags and returns E_INVALIDARG. Nothing is written, the PC device is not called.
 //   slot 76   resource creation -> PC CreateCommittedResource (PC slot 27), with the Xbox layout word ignored.
 //   slot 127  CreateCommittedResource3 (heap, flags, desc1, layout, clear, session, castable count/list, riid, out) ->
 //             PC ID3D12Device10::CreateCommittedResource3 (PC slot 76), with the Xbox layout word replaced and the
@@ -50,11 +56,14 @@
 //
 // Command queues and fences (device slots 8, 75, 36, and 32 for a shared fence) come back wrapped in queue and fence
 // proxies of the same kind: the public chain (19 queue slots, 11 or 12 fence slots in SDK 10.0.26100) is forwarded
-// in PC order, and a slot past it, up to the end of the proxy's table (128 queue, 64 fence slots), is logged with its
-// first four argument words and refused with E_NOTIMPL. A slot past the table faults on the vtable read inside a
-// reserved, never-committed region, and the fault is logged with the slot. That is where the console's queue methods
-// (PresentX, SuspendX, ResumeX) will show up; their slots are not known and are not guessed, and that the console
-// keeps the public slots is an assumption (docs/d3d12_command_objects.md §5.2). Heap, queue and fence proxies are
+// in PC order. Queue slot 35 is the console ExecuteCommandLists(count, lists) variant and forwards to PC slot 10;
+// every other slot past the public chain, up to the end of the proxy's table (128 queue, 64 fence slots), is logged
+// with its first four argument words and refused with E_NOTIMPL. Fence slot 12 is served instead: the retail executable
+// reads its return as the address of the fence's 64-bit completed value, so it returns a per-fence mirror that a wait on
+// the real fence keeps current (d3d12_xs_device.cpp, "Fence slot 12"). A slot past the table faults on the vtable read inside a
+// reserved, never-committed region, and the fault is logged with the slot. PresentX, SuspendX and ResumeX slots past
+// the public chain remain refused until measured and implemented, and that the console keeps the public slots is an
+// assumption (docs/d3d12_command_objects.md §5.2). Heap, queue and fence proxies are
 // unwrapped wherever a device or queue method hands them to the real runtime: queue Signal/Wait (14/15), device
 // CreateSharedHandle (31), MakeResident/Evict (34/35), SetEventOnMultipleFenceCompletion (45), SetResidencyPriority
 // (46) and EnqueueMakeResident (50). Command lists are not wrapped, so ExecuteCommandLists passes them through and a
@@ -66,6 +75,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+
+namespace leonida {
+class FrameTokenSource;
+}
 
 namespace rt::d3d12_xs {
 
@@ -98,6 +112,20 @@ void* device_proxy_primary(void* device);
 // True when `heap` is a descriptor-heap proxy created by device slot 14.
 bool is_heap_proxy(const void* heap);
 ID3D12DescriptorHeap* heap_proxy_real_heap(const void* heap);
+
+// Console D3D12 descriptor heaps allocate their backing through XMem (allocator ID 0x80 = eXALLOCAllocatorId_D3D in
+// bits 16..23, object type 4 in the low 14 bits). A title that intercepts this allocation via __XMemAllocationHooks__
+// returns its own virtual address and expects GetCPUDescriptorHandleForHeapStart() to return that address.
+inline constexpr std::uint64_t kXmemDescriptorHeapAttributes = (0x80ULL << 16) | 4ULL;
+using DescriptorHeapBackingAlloc = void* (*)(std::size_t byte_size, std::uint64_t attributes);
+using DescriptorHeapBackingFree = void (*)(void* ptr, std::uint64_t attributes);
+// Installs (or clears when both are null) the backing allocator consulted by CreateDescriptorHeap (slot 14).
+void set_descriptor_heap_allocator(DescriptorHeapBackingAlloc alloc, DescriptorHeapBackingFree free);
+// Installs the default bridge (used by D3D12XboxCreateDevice) only when no explicit allocator has been set.
+void set_default_descriptor_heap_allocator(DescriptorHeapBackingAlloc alloc, DescriptorHeapBackingFree free);
+// Translates a CPU descriptor handle from a title-backed descriptor heap to the underlying PC/Vulkan heap handle.
+// Returns `handle` unchanged when it does not fall inside any active custom-backed heap.
+D3D12_CPU_DESCRIPTOR_HANDLE translate_cpu_descriptor_handle(const void* device, D3D12_CPU_DESCRIPTOR_HANDLE handle);
 
 // Number of PC vtable slots the proxy forwards (detected from the interfaces the PC device supports).
 unsigned device_proxy_slot_count(const void* device);
@@ -132,13 +160,22 @@ using ConsoleDescriptorHeapHandler = HRESULT (*)(ID3D12Device* real, const D3D12
                                                 REFIID riid, void** out);
 void set_console_descriptor_heap_handler(ConsoleDescriptorHeapHandler handler);
 
+std::shared_ptr<leonida::FrameTokenSource> device_frame_tokens(const void* device);
+
 // True for slots the proxy handles itself rather than forwarding verbatim: IUnknown (0-2), 8 and 75 (queue
-// proxies), 9 (allocator proxies), 14, 26 (the console's struct-return form),
+// proxies), 9 (allocator proxies), 14 (descriptor heap proxy), 17-24 (CPU descriptor handle translation), 26 (the
+// console's struct-return form),
 // 31/34/35/45/46/50 (proxies unwrapped), 32 and 36 (fence proxies), 48/73 and
-// 78/79/80 (the Xbox slots above, at their configured indices), 62, 67, 70, 76 and 127. Slot 10 is intentionally false: the
+// 78/79/80 (the Xbox slots above, at their configured indices), 62, 67, 70, 74, 76 and 127. Slot 10 is intentionally false: the
 // measured 9/10 handle conversion is on the heap proxy, and device slot 9 is CreateCommandAllocator, which the proxy
 // handles for the allocator proxy.
 bool device_slot_overridden(unsigned slot);
+
+// Whether a return address is in an image the guest loader mapped, i.e. the call comes from the title. Device slot 61
+// is CreateSamplerX for such a caller and the PC ID3D12Device5::CreateMetaCommand for any other; with no check
+// installed every caller is a host one. D3D12XboxCreateDevice installs rt::shims::mapped_image_base.
+using ConsoleCaller = bool (*)(std::uint64_t address);
+void set_console_caller(ConsoleCaller classify);
 
 // Queue and fence proxies created by device slots 8/75 and 36. The real_* accessors return the wrapped object
 // (no reference added), or null when the pointer is not such a proxy.
@@ -151,6 +188,9 @@ unsigned queue_proxy_slot_count(const void* queue);
 unsigned fence_proxy_slot_count(const void* fence);
 unsigned queue_proxy_table_size();
 unsigned fence_proxy_table_size();
+// True for queue slots handled by the proxy instead of forwarded verbatim past IUnknown: 0-2 (IUnknown),
+// 7 (GetDevice), 14/15 (Signal/Wait unwrap fences), and 35 (Xbox ExecuteCommandLists variant -> PC slot 10).
+bool queue_slot_overridden(unsigned slot);
 // Live references on a queue, fence or allocator proxy (0 for anything else). Test helper.
 unsigned long command_object_proxy_ref_count(const void* object);
 // Per-slot call counters and first-call flags, shared by all queue proxies and all fence proxies.
@@ -165,10 +205,11 @@ std::uint64_t fence_table_overruns();
 // or the fault logger failed).
 bool command_object_tables_guarded();
 
-// Command allocator proxies (device slot 9): the public chain (9 slots: the base chain and Reset) is forwarded, a
-// slot past it up to the end of the table (64 slots) is logged and refused with E_NOTIMPL, and a read past the
-// table faults in a guard region, as for queues and fences. The console allocator's extra methods are not
-// measured and not guessed. Slot 9 wraps only an allocator that answers kLeonidaCommandAllocatorTag, Leonida's
+// Command allocator proxies (device slot 9): the public chain (9 slots: the base chain and Reset) is forwarded,
+// slot 9 (console SetAllocatorCallbackX(callback, context, ...)) records the callback and context on the proxy and
+// returns S_OK without invoking the callback on the PC/Vulkan path, slots 10..63 are logged and refused with
+// E_NOTIMPL, and a read past the table faults in a guard region, as for queues and fences. Slot 9 wraps only an
+// allocator that answers kLeonidaCommandAllocatorTag, Leonida's
 // own Vulkan-layer allocator: its command lists resolve the proxy (CreateCommandList, Reset). A PC runtime
 // allocator goes back unchanged, because the PC runtime's lists would take a proxy for their own allocator; a
 // command-list proxy that unwraps at Reset is what lets the host backend wrap allocators too.
@@ -180,6 +221,9 @@ bool is_allocator_proxy(const void* allocator);
 ID3D12CommandAllocator* allocator_proxy_real_allocator(const void* allocator);
 unsigned allocator_proxy_slot_count(const void* allocator);
 unsigned allocator_proxy_table_size();
+// Callback and context recorded by console allocator slot 9 (SetAllocatorCallbackX), or 0 if unset / not a proxy.
+std::uintptr_t allocator_proxy_callback(const void* allocator);
+std::uintptr_t allocator_proxy_callback_context(const void* allocator);
 std::uint64_t allocator_slot_hits(unsigned slot);
 bool allocator_slot_first_call_seen(unsigned slot);
 std::uint64_t allocator_table_overruns();
@@ -202,6 +246,7 @@ inline constexpr unsigned console_to_pc_list_slot(unsigned slot) {
     if (slot == 60) return 58;                 // EndEvent (no console SetMarker/BeginEvent)
     if (slot == 61) return 59;                 // ExecuteIndirect (Package)
     if (slot == 85) return 16;                 // CopyTextureRegionX -> CopyTextureRegion
+    if (slot == 139) return 10;                // Reset(allocator, pso), as the retail title calls it (measured, Pipodi)
     if (slot == 146) return 80;                // D3D12_BARRIER_GROUP (Package; PC GCL7)
     return kListNotForwarded;
 }
