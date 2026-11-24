@@ -175,6 +175,32 @@ class RunnerTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn("init-boom", result.stdout + result.stderr)
 
+    def test_package_initializer_runs_once_in_parallel(self):
+        # `python -m unittest pkg.__init__` imports pkg and then runs the same file again as pkg.__init__, so this
+        # registration happens twice; the runner hands unittest the package name instead.
+        init = ("import unittest\n"
+                "registrations = []\n"
+                "registrations.append(__name__)\n"
+                "class T(unittest.TestCase):\n"
+                "    def test_once(self):\n"
+                "        self.assertEqual(registrations, ['pkg'])\n")
+        for jobs in (1, 2):
+            with self.subTest(jobs=jobs), tempfile.TemporaryDirectory() as tmp:
+                suite(tmp, {"pkg/__init__.py": init})
+                result = cli(tmp, "-j", str(jobs))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_empty_package_alone_is_not_a_false_green(self):
+        # -j 1 forwards to discover, which exits 5 when nothing ran; a parallel run whose only job is an empty
+        # initializer must not report success either.
+        for jobs in (1, 2):
+            with self.subTest(jobs=jobs), tempfile.TemporaryDirectory() as tmp:
+                suite(tmp, {"pkg/__init__.py": ""})
+                result = cli(tmp, "-j", str(jobs))
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                if jobs == 2:
+                    self.assertIn("no tests ran", result.stdout)
+
     def test_all_pass(self):
         with tempfile.TemporaryDirectory() as tmp:
             suite(tmp, {"helper.py": "X = 1\n", "test_p1.py": PASS, "test_p2.py": PASS})

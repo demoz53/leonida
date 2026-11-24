@@ -20,7 +20,8 @@
   <a href="#want-to-help">Want to help?</a> |
   <a href="#credits">Credits</a> |
   <a href="#license">License</a> |
-  <a href="https://discord.gg/ETf4qj5acN">Discord</a>
+  <a href="https://discord.gg/ETf4qj5acN">Discord</a> |
+  <a href="https://t.me/mandyport">Telegram</a>
 </p>
 
 Leonida is a static recompilation project. The Xbox Series CPU is x86-64 like a PC, so the game's code is loaded
@@ -40,6 +41,8 @@ happens **on your PC, from your own copy of the game**.
 > that point belongs to NotRexed and the contributors listed in the history.
 
 Discord: https://discord.gg/ETf4qj5acN
+
+Telegram: https://t.me/mandyport
 
 Original author's Git Mirror: https://git.notrexed.dev/notrexed/Leonida
 <br>

@@ -36,8 +36,9 @@ TOTAL = (len(check.COMPUTE) + 7 + len(check.CS_DUMPS) + len(check.W64X_DUMPS) + 
          + len(check.PIXEL_TESTS) + len(check.CLIP_TESTS) + len(check.BOUNDS) + len(check.GLOBAL_OFFSET)
          + len(check.MIP_TEST_PASSES) + len(check.GRADIENT_TESTS)
          + len(check.STORE_WORDS) + len(check.GET_LOD_TESTS)
-         + len(check.TEXTURE_CONSTANTS) + 16)  # three mesh fixtures, ps_tex, ps_imgatomic, ps_table_fetch, six compute fixtures,
-         # ps_ssharp, vs_base_ids, main's standalone cs_fmt_d16_xyz / cs_heap_init dumps (net one more case) and cs_fmt_all
+         + len(check.TEXTURE_CONSTANTS) + 17)  # three mesh fixtures, ps_tex, ps_imgatomic, ps_table_fetch, six compute fixtures,
+         # ps_ssharp, vs_base_ids, main's standalone cs_fmt_d16_xyz / cs_heap_init dumps (net one more case), cs_fmt_all
+         # and cs_w32_shift64
 CVT = {bits: [u, s] for bits, u, s in check.CVT_F32_SAT_CASES}
 
 
@@ -96,6 +97,14 @@ class Wave64Checks(unittest.TestCase):
                     env.get("VKC_OUT_WORDS") == "68"
                 words = check.HEAP_INIT_EXPECTED if seeded else [0xEEEEEEEE] * 8
                 return 0, "out[0..7] = " + " ".join(map(str, words)) + "\n"
+            if name == "cs_w32_shift64":
+                # The shifted words come back only if check.py seeded the input records through VKC_HEAP_INIT.
+                initial, expected = check.shift64_words()
+                self.assertEqual((args, env["VKC_OUT_WORDS"]), (("1", "dump"), str(len(expected))))
+                seeded = Path(env["VKC_HEAP_INIT"]).read_bytes() == struct.pack(f"<{len(initial)}I", *initial)
+                words = expected if seeded else initial
+                Path(env["VKC_DUMP"]).write_bytes(struct.pack(f"<{len(words)}I", *words))
+                return 0, ""
             if name == "cs_user_sgprs":
                 # The seeded words come back only if check.py passed them in VKC_SGPRS.
                 seeded = (env or {}).get("VKC_SGPRS") == check.USER_SGPRS_ENV["VKC_SGPRS"]

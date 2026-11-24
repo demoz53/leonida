@@ -1,5 +1,5 @@
-// xgameruntime: XGameEventImpl, XGameUiImpl, XGameStreamingImpl, XDisplayImpl, XUserDeviceImpl, XAccessibilityImpl,
-// XLauncherImpl and XAppCaptureImpl, offline: small classes a title calls early.
+// xgameruntime: XGameEventImpl, XGameUiImpl, XGameStreamingImpl, XDisplayImpl, XUserDeviceImpl, XAccessibilityImpl
+// and XLauncherImpl, offline: small classes a title calls early.
 //
 // Each XGameEvent*, XGameUi* and XGameStreaming* function in xgameruntime.lib asks QueryApiImpl for its class and
 // calls one slot with its own arguments after `this`. The class and interface ids and the method order are
@@ -18,19 +18,19 @@
 //   XUserDeviceImpl     every device belongs to the offline user; associations and audio endpoints never change, so
 //                       their change registrations are kept until unregistered and never called back; the user has
 //                       no audio endpoint of its own; finding a controller shows no UI (as on desktop).
-//   XAccessibilityImpl  high contrast is Off, closed captions can't be configured, no voice is installed (enumerating
-//                       calls back zero times), XSpeechSynthesizerCreate hands out a silent synthesizer whose
+//   XAccessibilityImpl  high contrast is Off, closed captions can't be configured, one silent voice is installed
+//                       (enumerating calls back once), XSpeechSynthesizerCreate hands out a synthesizer whose
 //                       text/SSML streams return a valid 44-byte empty 16 kHz mono 16-bit PCM WAVE header so titles
 //                       that play narration continue cleanly; speech-to-text display calls fail (E_FAIL).
 //   XLauncherImpl       XLaunchUri fails offline (E_FAIL); XDisplayAcquireTimeoutDeferral / Close acquire and clear a
 //                       real Win32 PowerRequestDisplayRequired handle so the host display stays awake.
-//   XAppCaptureImpl     implemented offline; TakeScreenshot reports ERROR_NOT_SUPPORTED.
 //
 // Slots whose signature the public pages don't give answer with a value that is safe whichever way the caller reads
 // it: see `client_not_connected` (XGameStreaming) and `offline_failure`.
 #include <windows.h>
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -606,10 +606,26 @@ HRESULT STDMETHODCALLTYPE accessibility_high_contrast(void*, uint32_t* mode) {
 // 4: HRESULT XClosedCaptionSetEnabled(bool enabled): there are no captions to show; accepted and dropped.
 HRESULT STDMETHODCALLTYPE accessibility_captions_set_enabled(void*, bool) { return S_OK; }
 
-// 8: HRESULT XSpeechSynthesizerEnumerateInstalledVoices(callback, void* context): no voice is installed, so the
-// callback runs zero times. ASSUMPTION: the argument order (GDK reference), only the count (2) was measured.
-HRESULT STDMETHODCALLTYPE speech_enumerate_voices(void*, void* callback, void*) {
-    return callback ? S_OK : E_INVALIDARG;
+// XSpeechSynthesizerVoiceInformation and its callback, in the GDK reference's member order (the gender is
+// XSpeechSynthesizerVoiceGender, a uint32_t enum: Female 0, Male 1).
+struct SpeechVoiceInformation {
+    const char* description;
+    const char* display_name;
+    uint32_t gender;
+    const char* voice_id;
+    const char* language;
+};
+static_assert(offsetof(SpeechVoiceInformation, voice_id) == 24 && sizeof(SpeechVoiceInformation) == 40, "x64 layout");
+using InstalledVoicesCallback = bool(CALLBACK*)(const SpeechVoiceInformation* information, void* context);
+constexpr SpeechVoiceInformation kSilentVoice = {"Leonida silent voice - English (United States)",
+                                                 "Leonida silent voice", 0, "leonida-silent", "en-US"};
+
+// 8: HRESULT XSpeechSynthesizerEnumerateInstalledVoices(void* context, callback): one voice, the silent one every
+// synthesizer below speaks with. ASSUMPTION: the argument order (GDK reference), only the count (2) was measured.
+HRESULT STDMETHODCALLTYPE speech_enumerate_voices(void*, void* context, InstalledVoicesCallback callback) {
+    if (!callback) return E_INVALIDARG;
+    callback(&kSilentVoice, context);
+    return S_OK;
 }
 
 // Valid 44-byte RIFF/WAVE header for 16 kHz, 16-bit mono PCM with 0 data bytes (silent speech stream).
@@ -639,9 +655,11 @@ HRESULT STDMETHODCALLTYPE speech_set_default_voice(void*, void* handle) {
     return handle == &g_speech_synth_handle ? S_OK : E_INVALIDARG;
 }
 
-// 12: HRESULT XSpeechSynthesizerSetCustomVoice(XSpeechSynthesizerHandle handle, const char* voiceId)
-HRESULT STDMETHODCALLTYPE speech_set_custom_voice(void*, void* handle, const char*) {
-    return handle == &g_speech_synth_handle ? S_OK : E_INVALIDARG;
+// 12: HRESULT XSpeechSynthesizerSetCustomVoice(XSpeechSynthesizerHandle handle, const char* voiceId): only the
+// enumerated voice is installed.
+HRESULT STDMETHODCALLTYPE speech_set_custom_voice(void*, void* handle, const char* voice_id) {
+    if (handle != &g_speech_synth_handle || !voice_id) return E_INVALIDARG;
+    return std::strcmp(voice_id, kSilentVoice.voice_id) == 0 ? S_OK : E_INVALIDARG;
 }
 
 // 13, 21: HRESULT XSpeechSynthesizerCreateStreamFromText/Ssml(synthesizer, const char* text,
@@ -761,40 +779,6 @@ HRESULT STDMETHODCALLTYPE launcher_query_interface(void*, REFIID iid, void** out
     return answer(&g_launcher_object, &kLauncherClass, &kLauncherClass + 1, iid, out);
 }
 
-// ======================= XAppCaptureImpl =======================
-
-constexpr char kAppCaptureName[] = "XAppCaptureImpl";
-constexpr GUID kAppCaptureClass = {0xa4f1aee2, 0x4bf1, 0x4485, {0xb0, 0x08, 0xa7, 0xc2, 0x6d, 0x52, 0xac, 0x27}};
-const GUID kAppCaptureInterfaces[] = {
-    kAppCaptureClass,
-    {0x22e672d7, 0xb4e3, 0x406c, {0xbd, 0x50, 0x8f, 0x0d, 0x25, 0x23, 0x6f, 0x9e}},   // IXAppCaptureImpl
-};
-
-// 5: HRESULT XAppCaptureTakeScreenshot(XUserHandle user, XAppCaptureTakeScreenshotResult* result)
-HRESULT STDMETHODCALLTYPE app_capture_take_screenshot(void*, void*, void*) {
-    static std::atomic<bool> s_logged{false};
-    if (!s_logged.exchange(true))
-        std::fprintf(stderr, "[rt] xgameruntime: XAppCaptureTakeScreenshot is not supported offline\n");
-    return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
-}
-
-template <int Slot> HRESULT STDMETHODCALLTYPE app_capture_unknown(void* self) {
-    return unknown_slot<kAppCaptureName, Slot>(self);
-}
-
-HRESULT STDMETHODCALLTYPE app_capture_query_interface(void*, REFIID iid, void** out);
-const void* const kAppCaptureVtable[] = {
-    FN(app_capture_query_interface), FN(object_add_ref), FN(object_release),   // 0-2 IUnknown
-    FN(app_capture_unknown<3>),             // 3 diagnostic screenshot
-    FN(app_capture_unknown<4>),             // 4 diagnostic clip
-    FN(app_capture_take_screenshot),        // 5 XAppCaptureTakeScreenshot
-};
-static_assert(std::size(kAppCaptureVtable) == 6, "IUnknown + IXAppCaptureImpl slots");
-ClassObject g_app_capture_object{kAppCaptureVtable};
-HRESULT STDMETHODCALLTYPE app_capture_query_interface(void*, REFIID iid, void** out) {
-    return answer(&g_app_capture_object, std::begin(kAppCaptureInterfaces), std::end(kAppCaptureInterfaces), iid, out);
-}
-
 #undef FN
 
 }  // namespace
@@ -829,10 +813,6 @@ bool xgameruntime_offline_query(const GUID& class_id, REFIID interface_id, void*
     }
     if (class_id == kLauncherClass) {
         *hr = launcher_query_interface(nullptr, interface_id, out);
-        return true;
-    }
-    if (class_id == kAppCaptureClass) {
-        *hr = app_capture_query_interface(nullptr, interface_id, out);
         return true;
     }
     return false;

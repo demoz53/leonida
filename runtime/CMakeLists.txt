@@ -106,11 +106,48 @@ if(WIN32 AND LEONIDA_BUILD_WINDOWS_RUNTIME)
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
   )
 
+  # Rust XMA2 decoder (runtime/xma_decoder), built at configure time when cargo is on PATH.
+  # Without it (or if that build fails) the runtime still builds and XMA voices output silence.
+  option(LEONIDA_REQUIRE_XMA2_DECODER "Fail configure if the Rust XMA2 decoder is unavailable" OFF)
+  find_program(LEONIDA_CARGO cargo)
+  if(LEONIDA_CARGO)
+    # Cargo's host (or configured default target) can differ from the runtime's MSVC ABI.
+    set(_xma_target x86_64-pc-windows-msvc)
+    set(_xma_target_dir ${CMAKE_BINARY_DIR}/xma_decoder)
+    set(_xma_lib ${_xma_target_dir}/${_xma_target}/release/leonida_xma2_decoder.lib)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+      ${CMAKE_CURRENT_SOURCE_DIR}/xma_decoder/Cargo.toml
+      ${CMAKE_CURRENT_SOURCE_DIR}/xma_decoder/Cargo.lock
+      ${CMAKE_CURRENT_SOURCE_DIR}/xma_decoder/src/lib.rs)
+    execute_process(
+      COMMAND ${LEONIDA_CARGO} build --release --locked --target ${_xma_target}
+              --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/xma_decoder/Cargo.toml
+              --target-dir ${_xma_target_dir}
+      TIMEOUT 120
+      RESULT_VARIABLE _xma_result)
+    if(_xma_result STREQUAL "0" AND EXISTS ${_xma_lib})
+      add_library(leonida_xma2_decoder STATIC IMPORTED)
+      # Link Rust's Windows SDK dependencies. CMake's C++ target selects its own CRT
+      # (/MD or /MDd); the C ABI keeps allocation and deallocation on the same side.
+      set_target_properties(leonida_xma2_decoder PROPERTIES
+        IMPORTED_LOCATION ${_xma_lib}
+        INTERFACE_INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR}/xma_decoder
+        INTERFACE_COMPILE_DEFINITIONS LEONIDA_HAVE_XMA2_DECODER=1
+        INTERFACE_LINK_LIBRARIES "kernel32;ntdll;userenv;ws2_32;dbghelp")
+    else()
+      message(WARNING "cargo build of runtime/xma_decoder failed: XMA voices will be silent")
+    endif()
+  else()
+    message(STATUS "cargo not found: runtime/xma_decoder not built, XMA voices will be silent")
+  endif()
+  if(LEONIDA_REQUIRE_XMA2_DECODER AND NOT TARGET leonida_xma2_decoder)
+    message(FATAL_ERROR "LEONIDA_REQUIRE_XMA2_DECODER is enabled, but the Rust XMA2 decoder is unavailable")
+  endif()
+
   add_executable(gta6rt
     src/main.cpp
     src/host_cpu.cpp
     src/pe_loader.cpp
-    src/xma2_decoder.cpp
     shims/registry.cpp
     shims/file_system.cpp
     shims/winhttp_offline.cpp
@@ -129,7 +166,6 @@ if(WIN32 AND LEONIDA_BUILD_WINDOWS_RUNTIME)
     shims/xbox_bvh_builder.cpp
     shims/library_loader.cpp
     shims/process.cpp
-    shims/lifecycle.cpp
     shims/com_shim.cpp
     shims/bcrypt_rng.cpp
     shims/xapu_chad.cpp
@@ -248,13 +284,17 @@ if(WIN32 AND LEONIDA_BUILD_WINDOWS_RUNTIME)
   add_executable(acphal_test
     test/acphal_test.cpp
     shims/acphal.cpp
-    src/xma2_decoder.cpp
     shims/registry.cpp
   )
-  target_include_directories(acphal_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shims ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_include_directories(acphal_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shims)
   target_compile_definitions(acphal_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_compile_options(acphal_test PRIVATE /W4 /permissive- /utf-8)
   target_link_options(acphal_test PRIVATE /OPT:NOREF)
+
+  if(TARGET leonida_xma2_decoder)
+    target_link_libraries(gta6rt PRIVATE leonida_xma2_decoder)
+    target_link_libraries(acphal_test PRIVATE leonida_xma2_decoder)
+  endif()
 
   # The Zen 2 instructions a desktop CPU may lack (src/cpu_emulation.h): decoded, emulated on a CONTEXT, and run for
   # real with the #UD handler installed, so an Intel host takes the emulated path and an AMD one the native path.
@@ -298,18 +338,6 @@ if(WIN32 AND LEONIDA_BUILD_WINDOWS_RUNTIME)
   target_compile_options(process_cmdline_test PRIVATE /W4 /permissive- /utf-8)
   target_link_options(process_cmdline_test PRIVATE /OPT:NOREF)
   target_link_libraries(process_cmdline_test PRIVATE shell32)
-
-  # Console lifecycle shim: RegisterAppStateChangeNotification, oversized window fitting, and subclass forwarding.
-  add_executable(lifecycle_test
-    test/lifecycle_test.cpp
-    shims/lifecycle.cpp
-    shims/registry.cpp
-  )
-  target_include_directories(lifecycle_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shims)
-  target_compile_definitions(lifecycle_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-  target_compile_options(lifecycle_test PRIVATE /W4 /permissive- /utf-8)
-  target_link_options(lifecycle_test PRIVATE /OPT:NOREF)
-  target_link_libraries(lifecycle_test PRIVATE user32)
 
   # Console paths (GAME:) and the write overlay: the file shims resolved through the registry, over temporary folders.
   add_executable(file_system_test
@@ -595,13 +623,6 @@ if(BUILD_TESTING)
   add_test(NAME vulkan_device_filter COMMAND vulkan_device_filter_test)
   add_executable(vk_presenter_capture_colour_test test/vk_presenter_capture_colour_test.cpp)
   add_test(NAME vk_presenter_capture_colour COMMAND vk_presenter_capture_colour_test)
-  # Portable XMA2 packet parser and WMA Pro frame decoder (src/xma2_decoder.cpp): pure stdlib, no GPU.
-  add_executable(xma2_decoder_test test/xma2_decoder_test.cpp src/xma2_decoder.cpp)
-  target_include_directories(xma2_decoder_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-  if(MSVC)
-    target_compile_options(xma2_decoder_test PRIVATE /W4 /permissive- /utf-8)
-  endif()
-  add_test(NAME xma2_decoder COMMAND xma2_decoder_test)
   if(TARGET gta6rt)
     if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
       add_executable(cpp_unwind_test test/cpp_unwind_test.cpp)
@@ -663,6 +684,8 @@ if(BUILD_TESTING)
     add_executable(tiny_ga_tls test/fixtures/tiny_ga_tls.cpp)
     target_compile_definitions(tiny_ga_tls PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_options(tiny_ga_tls PRIVATE /W4 /permissive- /utf-8 /GS- /GA)
+    # /GA can remove the _tls_index reference that pulls in the CRT TLS directory.
+    target_link_options(tiny_ga_tls PRIVATE /INCLUDE:_tls_used)
     set_target_properties(tiny_ga_tls PROPERTIES
       OUTPUT_NAME tiny_ga_tls
       RUNTIME_OUTPUT_DIRECTORY "${TINY_FIXTURE_DIR}"
@@ -1223,6 +1246,7 @@ if(BUILD_TESTING)
   endif()
   if(WIN32 AND TARGET acphal_test)
     add_test(NAME acphal COMMAND acphal_test)
+    add_test(NAME acphal_noncached_only COMMAND acphal_test --noncached-only)
   endif()
   if(WIN32 AND TARGET cpu_emulation_test)
     add_test(NAME cpu_emulation COMMAND cpu_emulation_test)
@@ -1232,9 +1256,6 @@ if(BUILD_TESTING)
   endif()
   if(WIN32 AND TARGET process_cmdline_test)
     add_test(NAME process_cmdline COMMAND process_cmdline_test)
-  endif()
-  if(WIN32 AND TARGET lifecycle_test)
-    add_test(NAME lifecycle COMMAND lifecycle_test)
   endif()
   if(WIN32 AND TARGET file_system_test)
     add_test(NAME file_system COMMAND file_system_test)

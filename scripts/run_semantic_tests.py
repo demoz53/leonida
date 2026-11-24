@@ -16,7 +16,7 @@ It runs the files `python -m unittest discover -s tests/semantic` finds (`test*.
 `python -m unittest <module>` from that folder, so a file sees the same import path as under discover. The files can
 run side by side because each one writes only into its own temporary folder; a new test must do the same. With -j 1,
 or on a single core, it runs that discover command itself. Prints the output of every failing file and one summary
-line, and exits 1 if a file fails or none is found. Standard library only.
+line, and exits 1 if a file fails, none is found, or no test ran. Standard library only.
 
 `--timeout SECONDS` limits each module subprocess in parallel mode, or the entire discover subprocess with
 `-j 1`. The value must be positive and at most 86400 seconds (24 hours), keeping it within platform wait limits.
@@ -74,8 +74,12 @@ def positive_seconds(value):
 
 
 def run_module(directory, module, verbose, timeout=None):
-    """(return code, tests run, output) of `python -m unittest <module>` run from `directory`."""
-    cmd = [sys.executable, "-m", "unittest", *(["-v"] if verbose else []), module]
+    """(return code, tests run, output) of `python -m unittest <target>` run from `directory`."""
+    # `python -m unittest pkg.__init__` imports pkg and then runs the same file again as pkg.__init__, so a
+    # registration in the initializer happens twice. Running the package itself imports it once; module_path() is
+    # still the initializer's path, so the jobs stay sorted by the file they run.
+    target = module[:-len(".__init__")] if module.endswith(".__init__") else module
+    cmd = [sys.executable, "-m", "unittest", *(["-v"] if verbose else []), target]
     try:
         p = subprocess.run(cmd, cwd=directory, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                            errors="replace", timeout=timeout)
@@ -132,6 +136,11 @@ def main(argv=None):
     took = time.monotonic() - start
     summary = f"{len(modules)} files, {total} tests, {len(failed)} files failed in {took:.0f} s with {a.jobs} jobs"
     print(summary + (": " + ", ".join(sorted(failed)) if failed else ""))
+    if total == 0:
+        # An empty package initializer is a job that legitimately runs no tests; a run where every job did is not a
+        # pass (discover, which -j 1 forwards to, exits 5 for it).
+        print(f"no tests ran in {directory}")
+        return 1
     return 1 if failed else 0
 
 

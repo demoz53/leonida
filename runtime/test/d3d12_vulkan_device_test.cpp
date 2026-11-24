@@ -5183,6 +5183,12 @@ int main() {
         EXPECT(SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options))));
         EXPECT(options.ResourceBindingTier == D3D12_RESOURCE_BINDING_TIER_3);
         EXPECT(options.MaxGPUVirtualAddressBitsPerResource == 40);
+        // Console 0x40-byte (16-dword) D3D12_OPTIONS query (docs/d3d12_xs_surface.md §7.1): 0x3C PC prefix + zero tail.
+        UINT console_opts[16]{};
+        console_opts[15] = 0xdeadbeefu;
+        EXPECT(SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, console_opts, sizeof(console_opts))));
+        EXPECT(std::memcmp(console_opts, &options, sizeof(options)) == 0);
+        EXPECT(console_opts[15] == 0);
 
         D3D12_FEATURE_DATA_GPU_VIRTUAL_ADDRESS_SUPPORT va_support{};
         EXPECT(SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_GPU_VIRTUAL_ADDRESS_SUPPORT, &va_support, sizeof(va_support))));

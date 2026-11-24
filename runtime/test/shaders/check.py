@@ -372,6 +372,33 @@ def heap_init_env():
     return {"VKC_HEAP_INIT": path, "VKC_OUT_WORDS": str(len(HEAP_INIT_FILE) // 4)}
 
 
+def shift64_words():
+    """cs_w32_shift64: input heap and full expected readback, using Python integers as the oracle."""
+    values = (0, 1, 0xFFFFFFFF, 0x100000000, 0x7FFFFFFFFFFFFFFF,
+              0x8000000000000000, 0xFFFFFFFFFFFFFFFF, 0x8123456789ABCDEF)
+    counts = (0, 1, 31, 32, 33, 63, 64, 65)
+    inputs, results = [], []
+    for value in values:
+        for count in counts:
+            inputs.extend((value & 0xFFFFFFFF, value >> 32, count, 0xA5A5A5A5))
+            signed = value if value < (1 << 63) else value - (1 << 64)
+            shift = count & 63
+            for result in (value << shift, value >> shift, signed >> shift):
+                results.extend((result & 0xFFFFFFFF, (result >> 32) & 0xFFFFFFFF))
+    return [0xEEEEEEEE] * len(results) + inputs, results + inputs
+
+
+def shift64_test(tools, spirv, env=None):
+    """Verify all three 64-bit shifts for 64 memory-fed cases, including the untouched input records."""
+    initial, expected = shift64_words()
+    with tempfile.TemporaryDirectory(prefix="leonida-shift64-") as tmp:
+        path = Path(tmp) / "input.bin"
+        path.write_bytes(struct.pack(f"<{len(initial)}I", *initial))
+        child = dict(os.environ if env is None else env, VKC_HEAP_INIT=str(path))
+        child.setdefault("VKC_SUBGROUP_SIZE", str(subgroup_size(spirv, "cs_w32_shift64") or 32))
+        return dump_test(tools, spirv, "cs_w32_shift64", expected, len(expected), child)
+
+
 # cs_user_sgprs.asm: vk_compute_test puts these words in s4..s7 and the shader stores them back.
 USER_SGPRS = [0x4F000000, 0xDEADBEEF, 7, 0xFFFFFFFF]
 USER_SGPRS_ENV = {"VKC_SGPRS": ",".join(hex(w) for w in USER_SGPRS)}
@@ -1908,6 +1935,7 @@ def main():
                                                   expected_words=USER_SGPRS_WORDS, env=USER_SGPRS_ENV)))
     results.append(("cs_heap_init", compute_test(tools, spirv, "cs_heap_init", "1", "dump",
                                                  expected_words=HEAP_INIT_EXPECTED, env=heap_init_env())))
+    results.append(("cs_w32_shift64", shift64_test(tools, spirv)))
     results.append(("cs_cvt_f32_sat", cvt_f32_sat_test(tools, spirv)))
     results.append(("cs_fma_fused", fma_fused_test(tools, spirv)))
     results.append(("cs_cvt_pk_u8", compute_test(tools, spirv, "cs_cvt_pk_u8", "1", "dump",

@@ -47,7 +47,8 @@ $exe = "C:\path\to\game_scarlett_master.exe"
 $pkg = "C:\path\to\the\package"
 $trace = Join-Path $env:TEMP boot.jsonl
 $log = Join-Path $env:TEMP d3d12.log
-.\runtime\build\gta6rt.exe --run $exe --game-dir $pkg --trace $trace --trace-d3d12 2>&1 |
+& { $ErrorActionPreference = 'Continue'
+    .\runtime\build\gta6rt.exe --run $exe --game-dir $pkg --trace $trace --trace-d3d12 2>&1 } |
     ForEach-Object { $_.ToString() } |
     Out-File -LiteralPath $log -Width 4096 -Encoding utf8
 python -I tools\boot_trace.py $trace --d3d12 $log
@@ -56,6 +57,13 @@ python -I tools\boot_trace.py $trace --d3d12 $log
 The capture pipeline writes each message as text to avoid PowerShell 5.1 wrapping the first stderr record at a
 narrow output width. The tool also reads existing UTF-16LE logs saved with `2>` in PowerShell 5.1 and recognizes
 the `program.exe : ` prefix on the first stderr line.
+
+The `& { ... }` block matters when the session (or a profile or script) has `$ErrorActionPreference = 'Stop'`:
+Windows PowerShell 5.1 then turns the first stderr line into a terminating error, the run stops there, and the log
+holds no `[d3d12-trace]` line, so it reads as a run with no D3D12 call. The block sets `Continue` for the run only
+(`scripts/first_look.ps1` captures its dry run the same way). Measured on 5.1.26100 with a stand-in that prints three
+trace lines to stderr and exits 37: without the block, all three with `Continue` and none with `Stop`; with it, all
+three with either, `$LASTEXITCODE` 37, and the session's preference unchanged.
 
 Linux under Wine (a cross build made with xwin, or the `runtime-windows` artifact; the backend must be Vulkan):
 

@@ -353,12 +353,70 @@ BOOL WSAAPI wsa_connect_by_list_offline(SOCKET s, PSOCKET_ADDRESS_LIST addr_list
     return real_fn(s, addr_list, local_addr_len, local_addr, remote_addr_len, remote_addr, timeout, reserved);
 }
 
+// sendto, WSASendTo, WSASendMsg and WSAJoinLeaf bind an unbound socket to the wildcard address (Microsoft's remarks
+// for sendto and WSAJoinLeaf: getsockname then reports 0.0.0.0 or ::), so its port would also take datagrams from other
+// hosts. Bind such a socket to the loopback address of the (already checked) loopback destination's family first.
+// Returns false, with WSAEADDRNOTAVAIL set, only if the socket is still unbound afterwards.
+bool bind_loopback_if_unbound(SOCKET s, const sockaddr* dest) {
+    using NameFn = int(WSAAPI*)(SOCKET, sockaddr*, int*);
+    using BindFn = int(WSAAPI*)(SOCKET, const sockaddr*, int);
+    using LastErrFn = int(WSAAPI*)();
+    static NameFn real_getsockname = host_proc<NameFn>("getsockname");
+    static BindFn real_bind = host_proc<BindFn>("bind");
+    static LastErrFn real_last_error = host_proc<LastErrFn>("WSAGetLastError");
+    if (!real_getsockname || !real_bind || !real_last_error) {
+        set_wsa_error(WSAEADDRNOTAVAIL);
+        return false;
+    }
+    // Unbound is WSAEINVAL; any other getsockname error (not a socket, ...) is left for the real call to report.
+    const auto unbound = [&] {
+        sockaddr_storage local{};
+        int local_len = sizeof(local);
+        return real_getsockname(s, reinterpret_cast<sockaddr*>(&local), &local_len) == SOCKET_ERROR &&
+               real_last_error() == WSAEINVAL;
+    };
+    if (!unbound()) return true;
+
+    sockaddr_storage local{};
+    int local_len = 0;
+    if (dest->sa_family == AF_INET) {
+        auto* v4 = reinterpret_cast<sockaddr_in*>(&local);
+        v4->sin_family = AF_INET;
+        auto* b = reinterpret_cast<uint8_t*>(&v4->sin_addr);
+        b[0] = 127;
+        b[3] = 1;
+        local_len = sizeof(sockaddr_in);
+    } else {
+        sockaddr_in6 to6{};
+        std::memcpy(&to6, dest, sizeof(to6));
+        const auto* d = reinterpret_cast<const uint8_t*>(&to6.sin6_addr);
+        auto* v6 = reinterpret_cast<sockaddr_in6*>(&local);
+        v6->sin6_family = AF_INET6;
+        auto* b = reinterpret_cast<uint8_t*>(&v6->sin6_addr);
+        if (d[10] == 0xff && d[11] == 0xff) {  // IPv4-mapped loopback destination: ::ffff:127.0.0.1
+            b[10] = 0xff;
+            b[11] = 0xff;
+            b[12] = 127;
+            b[15] = 1;
+        } else {  // ::1
+            b[15] = 1;
+        }
+        local_len = sizeof(sockaddr_in6);
+    }
+    // A concurrent send on the same socket may have bound it between the two checks; that bind came through here too.
+    if (real_bind(s, reinterpret_cast<const sockaddr*>(&local), local_len) == 0 || !unbound()) return true;
+    log_refused("implicit wildcard bind", format_sockaddr(reinterpret_cast<const sockaddr*>(&local), local_len));
+    set_wsa_error(WSAEADDRNOTAVAIL);
+    return false;
+}
+
 int WSAAPI sendto_offline(SOCKET s, const char* buf, int len, int flags, const sockaddr* to, int tolen) {
     if (to && tolen > 0 && !is_loopback_sockaddr(to, tolen)) {
         log_refused("sendto", format_sockaddr(to, tolen));
         set_wsa_error(WSAENETUNREACH);
         return SOCKET_ERROR;
     }
+    if (to && tolen > 0 && !bind_loopback_if_unbound(s, to)) return SOCKET_ERROR;
     using Fn = int(WSAAPI*)(SOCKET, const char*, int, int, const sockaddr*, int);
     static Fn real_fn = host_proc<Fn>("sendto");
     if (!real_fn) {
@@ -376,6 +434,7 @@ int WSAAPI wsa_send_to_offline(SOCKET s, LPWSABUF buffers, DWORD buffer_count, L
         set_wsa_error(WSAENETUNREACH);
         return SOCKET_ERROR;
     }
+    if (to && tolen > 0 && !bind_loopback_if_unbound(s, to)) return SOCKET_ERROR;
     using Fn = int(WSAAPI*)(SOCKET, LPWSABUF, DWORD, LPDWORD, DWORD, const sockaddr*, int, LPWSAOVERLAPPED,
                             LPWSAOVERLAPPED_COMPLETION_ROUTINE);
     static Fn real_fn = host_proc<Fn>("WSASendTo");
@@ -393,6 +452,7 @@ int WSAAPI wsa_send_msg_offline(SOCKET s, LPWSAMSG msg, DWORD flags, LPDWORD byt
         set_wsa_error(WSAENETUNREACH);
         return SOCKET_ERROR;
     }
+    if (msg && msg->name && msg->namelen > 0 && !bind_loopback_if_unbound(s, msg->name)) return SOCKET_ERROR;
     using Fn = int(WSAAPI*)(SOCKET, LPWSAMSG, DWORD, LPDWORD, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
     static Fn real_fn = host_proc<Fn>("WSASendMsg");
     if (!real_fn) {
@@ -444,6 +504,74 @@ int WSAAPI bind_offline(SOCKET s, const sockaddr* name, int namelen) {
     log_refused("bind", format_sockaddr(name, namelen));
     set_wsa_error(WSAEADDRNOTAVAIL);
     return SOCKET_ERROR;
+}
+
+// ---- Multicast ----
+
+// A multicast group join makes the host announce membership on a real interface and receive the group's traffic
+// from other hosts, so every join is refused. Leaving a group and the other options pass through.
+bool is_multicast_join(int level, int optname) {
+    if (level == IPPROTO_IP) {
+        return optname == IP_ADD_MEMBERSHIP || optname == IP_ADD_SOURCE_MEMBERSHIP || optname == MCAST_JOIN_GROUP ||
+               optname == MCAST_JOIN_SOURCE_GROUP;
+    }
+    if (level == IPPROTO_IPV6) {
+        return optname == IPV6_ADD_MEMBERSHIP || optname == MCAST_JOIN_GROUP || optname == MCAST_JOIN_SOURCE_GROUP;
+    }
+    return false;
+}
+
+int refuse_multicast_join(const char* op, int level, int optname) {
+    log_refused(op, "multicast join (level " + std::to_string(level) + ", option " + std::to_string(optname) + ")");
+    set_wsa_error(WSAEADDRNOTAVAIL);
+    return SOCKET_ERROR;
+}
+
+int WSAAPI setsockopt_offline(SOCKET s, int level, int optname, const char* optval, int optlen) {
+    if (is_multicast_join(level, optname)) return refuse_multicast_join("setsockopt", level, optname);
+    using Fn = int(WSAAPI*)(SOCKET, int, int, const char*, int);
+    static Fn real_fn = host_proc<Fn>("setsockopt");
+    if (!real_fn) {
+        set_wsa_error(WSAENETDOWN);
+        return SOCKET_ERROR;
+    }
+    return real_fn(s, level, optname, optval, optlen);
+}
+
+// wsock32.dll's setsockopt is its own export, not a forwarder: it takes the Winsock 1.1 IPPROTO_IP numbers, maps
+// 5 (winsock.h IP_ADD_MEMBERSHIP) to the Winsock 2 value and passes numbers it does not know through unchanged (Wine's
+// dlls/wsock32/socket.c remaps the same table). Refuse both spellings of a join, then let the host wsock32 remap.
+int WSAAPI wsock32_setsockopt_offline(SOCKET s, int level, int optname, const char* optval, int optlen) {
+    constexpr int kWinsock1AddMembership = 5;
+    if (is_multicast_join(level, optname) || (level == IPPROTO_IP && optname == kWinsock1AddMembership)) {
+        return refuse_multicast_join("wsock32 setsockopt", level, optname);
+    }
+    using Fn = int(WSAAPI*)(SOCKET, int, int, const char*, int);
+    static HMODULE host_wsock32 = LoadLibraryExW(L"wsock32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    static Fn real_fn = host_wsock32 ? reinterpret_cast<Fn>(GetProcAddress(host_wsock32, "setsockopt")) : nullptr;
+    if (!real_fn) {
+        set_wsa_error(WSAENETDOWN);
+        return SOCKET_ERROR;
+    }
+    return real_fn(s, level, optname, optval, optlen);
+}
+
+// WSAJoinLeaf joins a multipoint session; a group address is never loopback, so in practice every join is refused.
+SOCKET WSAAPI wsa_join_leaf_offline(SOCKET s, const sockaddr* name, int namelen, LPWSABUF caller_data,
+                                    LPWSABUF callee_data, LPQOS sqos, LPQOS gqos, DWORD flags) {
+    if (!is_loopback_sockaddr(name, namelen)) {
+        log_refused("WSAJoinLeaf", format_sockaddr(name, namelen));
+        set_wsa_error(WSAENETUNREACH);
+        return INVALID_SOCKET;
+    }
+    if (!bind_loopback_if_unbound(s, name)) return INVALID_SOCKET;
+    using Fn = SOCKET(WSAAPI*)(SOCKET, const sockaddr*, int, LPWSABUF, LPWSABUF, LPQOS, LPQOS, DWORD);
+    static Fn real_fn = host_proc<Fn>("WSAJoinLeaf");
+    if (!real_fn) {
+        set_wsa_error(WSAENETUNREACH);
+        return INVALID_SOCKET;
+    }
+    return real_fn(s, name, namelen, caller_data, callee_data, sqos, gqos, flags);
 }
 
 // ---- Name resolution shims ----
@@ -690,6 +818,7 @@ int PASCAL wsa_send_msg_ext_offline(SOCKET s, LPWSAMSG msg, DWORD flags, LPDWORD
         set_wsa_error(WSAENETUNREACH);
         return SOCKET_ERROR;
     }
+    if (msg && msg->name && msg->namelen > 0 && !bind_loopback_if_unbound(s, msg->name)) return SOCKET_ERROR;
     static constexpr GUID kSendMsgGuid = WSAID_WSASENDMSG;
     LPFN_WSASENDMSG real_fn = host_extension<LPFN_WSASENDMSG>(s, kSendMsgGuid);
     if (!real_fn) {
@@ -763,10 +892,11 @@ namespace {
 using namespace rt::ws2;
 }  // namespace
 
-// Both named exports and the fixed Windows ordinals (#2 bind, #4 connect, #20 sendto, #51 gethostbyaddr,
-// #52 gethostbyname, #102 WSAAsyncGetHostByAddr, #103 WSAAsyncGetHostByName) are registered so static imports by
-// ordinal and dynamic GetProcAddress lookups resolve to the same offline wrappers. wsock32.dll gets the same
-// wrappers for the entries it shares with ws2_32, since its exports forward to ws2_32 natively.
+// Both named exports and the fixed Windows ordinals (#2 bind, #4 connect, #20 sendto, #21 setsockopt,
+// #51 gethostbyaddr, #52 gethostbyname, #102 WSAAsyncGetHostByAddr, #103 WSAAsyncGetHostByName) are registered so
+// static imports by ordinal and dynamic GetProcAddress lookups resolve to the same offline wrappers. wsock32.dll gets
+// the same wrappers for the entries it shares with ws2_32, since those exports forward to ws2_32 natively; its
+// setsockopt is its own export (Winsock 1.1 option numbers), so it gets its own wrapper.
 SHIM_TABLE(ws2_offline,
     {"ws2_32.dll", "bind", reinterpret_cast<void*>(&bind_offline)},
     {"ws2_32.dll", "#2", reinterpret_cast<void*>(&bind_offline)},
@@ -774,6 +904,9 @@ SHIM_TABLE(ws2_offline,
     {"ws2_32.dll", "#4", reinterpret_cast<void*>(&connect_offline)},
     {"ws2_32.dll", "sendto", reinterpret_cast<void*>(&sendto_offline)},
     {"ws2_32.dll", "#20", reinterpret_cast<void*>(&sendto_offline)},
+    {"ws2_32.dll", "setsockopt", reinterpret_cast<void*>(&setsockopt_offline)},
+    {"ws2_32.dll", "#21", reinterpret_cast<void*>(&setsockopt_offline)},
+    {"ws2_32.dll", "WSAJoinLeaf", reinterpret_cast<void*>(&wsa_join_leaf_offline)},
     {"ws2_32.dll", "gethostbyaddr", reinterpret_cast<void*>(&gethostbyaddr_offline)},
     {"ws2_32.dll", "#51", reinterpret_cast<void*>(&gethostbyaddr_offline)},
     {"ws2_32.dll", "gethostbyname", reinterpret_cast<void*>(&gethostbyname_offline)},
@@ -803,6 +936,8 @@ SHIM_TABLE(ws2_offline,
     {"wsock32.dll", "#4", reinterpret_cast<void*>(&connect_offline)},
     {"wsock32.dll", "sendto", reinterpret_cast<void*>(&sendto_offline)},
     {"wsock32.dll", "#20", reinterpret_cast<void*>(&sendto_offline)},
+    {"wsock32.dll", "setsockopt", reinterpret_cast<void*>(&wsock32_setsockopt_offline)},
+    {"wsock32.dll", "#21", reinterpret_cast<void*>(&wsock32_setsockopt_offline)},
     {"wsock32.dll", "gethostbyaddr", reinterpret_cast<void*>(&gethostbyaddr_offline)},
     {"wsock32.dll", "#51", reinterpret_cast<void*>(&gethostbyaddr_offline)},
     {"wsock32.dll", "gethostbyname", reinterpret_cast<void*>(&gethostbyname_offline)},

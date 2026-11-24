@@ -64,14 +64,6 @@ Since the library-loader shims (`runtime/shims/library_loader.cpp`), a module's 
 
 The process shim (`runtime/shims/process.cpp`) serves `ExitProcess` and `GetCommandLineA/W` the same way: through `kernel32`, `kernelbase`, and `api-ms-win-core-processthreads-l1-1-0` and `api-ms-win-core-processenvironment-l1-1-0`, the sets the API-set umbrella libraries (`OneCore_apiset.lib`, `mincore.lib`) bind them to. `vcomp140.dll` imports `ExitProcess` from the first of these. The UCRT's `_get_narrow_winmain_command_line` and `_get_wide_winmain_command_line` are served too, so a `WinMain` executable gets the game's command line as `lpCmdLine`. `abort()` raises `SIGABRT` when the guest installed a handler (the guest's `signal()` import binds to the host CRT, so its table is the one raised here); with the default or ignore disposition, or a handler that returns, the run still ends with code 3. `run_tiny_game_abort_exit_codes` compares that with a native run of the stand-in image. The table above is `gta6rt --dry-run` on each DLL at the commit that added this paragraph.
 
-The lifecycle shim (`runtime/shims/lifecycle.cpp`) serves `RegisterAppStateChangeNotification` and
-`UnregisterAppStateChangeNotification` under `api-ms-win-core-psm-appnotify-l1-1-0`, `-l1-1-1` and `kernelbase.dll`, and
-`CreateWindowExW`/`CreateWindowExA` under `user32.dll` and the two `ext-ms-win-rtcore-ntuser-window-l1-1-*` sets. Only the
-title's first top-level window (no parent, not a child, not a tool window) is fitted to the work area and hooked: its
-`SC_CLOSE` runs the registered suspend callbacks with `quiesced` TRUE under the registration lock, then the run ends
-through the title's own `ExitProcess`, so the host finishes its cleanup. A 1 s deadline ends the run the same way if the
-callbacks have not returned.
-
 The shims added since account for the rest of the difference from the first version of the table. The UCRT's `_configure_narrow_argv`, `_configure_wide_argv`, `__p___argc`, `__p___wargv` and `abort` are served by `runtime/shims/process.cpp`, which is why almost every DLL gained one or two. The file-system calls listed in *Console paths and the write overlay* below (`CreateFile2`, `CopyFile2`, `CreateDirectoryW`, `FindFirstFileExW`, `SetFileAttributesW` and the rest) account for `msvcp140.dll`, `vcomp140.dll`, `Bink2Scarlett.dll`'s `CreateFile2` and part of the two HTTP clients. `winhttp.dll` is a module the shims own (*WinHTTP offline* below), so every `WinHttp*` import binds to it: 15 in `libHttpClient.GDK.dll` (all 16 but `WinHttpCrackUrl`) and 15 in `XCurl.dll` (all but `WinHttpQueryOption`). That is why the two HTTP clients moved the most: 11 to 26 and 9 to 24 shim imports.
 
 The UCRT argv configuration imports honor the executable's startup mode. Each run starts with `argc == 0` and
@@ -470,10 +462,13 @@ on the executable, the rest is not:
   card and text entry, which fail before starting.
 
 - **Accessibility and speech** (`IXAccessibilityImpl2`, slots 3-21): `XHighContrastGetMode` (5) answers Off and
-  `XClosedCaptionSetEnabled` (4) is accepted. No voice is installed: `XSpeechSynthesizerEnumerateInstalledVoices`
-  (8) calls back zero times and returns `S_OK`. `XSpeechSynthesizerCreate` (9) hands out a silent synthesizer handle
-  (`E_POINTER` for a null out pointer). Close (10), set default voice (11) and set custom voice (12) accept that handle
-  and refuse any other with `E_INVALIDARG`. Streams from text (13) and SSML (21) are created from it and return a
+  `XClosedCaptionSetEnabled` (4) is accepted. One silent voice is installed:
+  `XSpeechSynthesizerEnumerateInstalledVoices(context, callback)` (8) calls back once, with voice id `leonida-silent`
+  and language `en-US` (the GDK reference's `XSpeechSynthesizerVoiceInformation` layout), and returns `S_OK`
+  (`E_INVALIDARG` without a callback). `XSpeechSynthesizerCreate` (9) hands
+  out a synthesizer handle that speaks with it (`E_POINTER` for a null out pointer). Close (10), set default voice (11)
+  and set custom voice (12, only for that voice id) accept that handle and refuse any other with `E_INVALIDARG`.
+  Streams from text (13) and SSML (21) are created from it and return a
   stream handle; its close (14) accepts it. Stream size (15) reports 44 bytes and stream data (16) copies them: a valid
   RIFF/WAVE header for 16 kHz, 16-bit mono PCM with zero data bytes, so a title that plays narration reads a silent
   stream (a buffer under 44 bytes gets `ERROR_INSUFFICIENT_BUFFER`). A foreign handle on 15 or 16 gets `E_INVALIDARG`,
@@ -483,6 +478,7 @@ on the executable, the rest is not:
   `XDisplayAcquireTimeoutDeferral` (4) creates a Win32 `PowerRequestDisplayRequired` request and returns its handle (a
   failing `PowerCreateRequest` or `PowerSetRequest` returns the Win32 error as an HRESULT).
   `XDisplayCloseTimeoutDeferralHandle` (5) clears that request and closes the handle, so the display may sleep again.
+  Side effect on the host: while the title holds a deferral, Windows keeps the PC's display on.
 - **ASSUMPTION:** the parameter lists of the speech calls and `XHighContrastGetMode` (Off is 0), from the GDK
   reference; only the argument counts were measured, from `tools/gdk_runtime_calls.py` on the executable.
 - **HDR:** `XDisplayTryEnableHdrMode` answers Disabled, because the host output is SDR. With `LEONIDA_HDR=1` it
@@ -510,12 +506,11 @@ layout with the documented argument count, and each behaves as Microsoft's refer
 
 | Class | Interface asked for | Slots (args after `this`) | Offline behaviour |
 |---|---|---|---|
-| `XGameRuntimeFeatureImpl` | its class id | 3 `XGameRuntimeIsFeatureAvailable` (1, returns `bool`) | True when `QueryApiImpl` serves the class the feature's functions go through (whichever `xgameruntime*.cpp` serves it) and the feature is documented for Windows: today XAccessibility, XAppCapture, XSpeechSynthesizer, XLauncher, XAsync, XAsyncProvider, XTaskQueue, XThread, XError, XGame, XGameSave, XGameUI, XNetworking, XPackage, XPersistentLocalStorage, XStore, XSystem, XUser, XGameEvent, XGameStreaming. False for XDisplay (served, but documented for the consoles only), for the classes not served (XGameInvite) and for values past the enum |
+| `XGameRuntimeFeatureImpl` | its class id | 3 `XGameRuntimeIsFeatureAvailable` (1, returns `bool`) | True when `QueryApiImpl` serves the class the feature's functions go through (whichever `xgameruntime*.cpp` serves it) and the feature is documented for Windows: today XAccessibility, XSpeechSynthesizer, XLauncher, XAsync, XAsyncProvider, XTaskQueue, XThread, XError, XGame, XGameSave, XGameUI, XNetworking, XPackage, XPersistentLocalStorage, XStore, XSystem, XUser, XGameEvent, XGameStreaming. False for XDisplay (served, but documented for the consoles only), for the classes not served (XAppCapture, XGameInvite) and for values past the enum |
 | `XSystemAnalyticsImpl` | its class id | 3 `XSystemGetAnalyticsInfo` (1: the result's address, as MSVC passes a returned struct to a member function) | The named export's `XSystemAnalyticsInfo` |
 
-Not served yet, though `libHttpClient.GDK.dll` has thunks for them: `XGameInviteImpl`, among others.
-`XAppCaptureImpl` is served offline (`runtime/shims/xgameruntime_offline.cpp`): its class and interface ids answer,
-`XAppCaptureTakeScreenshot` (5) returns `ERROR_NOT_SUPPORTED`, and slots 3 and 4 go through the unknown-slot path.
+Not served yet, though `libHttpClient.GDK.dll` has thunks for them: `XAppCaptureImpl` and `XGameInviteImpl`,
+among others.
 
 Which classes the package's GDK modules reference, from a byte search for the class and interface GUIDs that
 xgameruntime-docs lists (16-byte in-memory form, every `.dll` of the package; counts only, nothing else read):
@@ -546,9 +541,9 @@ therefore needs no module name beyond the `xgameruntime.dll` it already has, whi
 
 | Class | Thunks | Referenced | Served |
 |---|---:|---:|---|
-| `XAccessibilityImpl` | 10 | 9 | yes |
-| `XAppCaptureImpl` | 1 | 1 | yes |
-| `XLauncherImpl` | 3 | 3 | yes |
+| `XAccessibilityImpl` | 10 | 9 | no |
+| `XAppCaptureImpl` | 1 | 1 | no |
+| `XLauncherImpl` | 3 | 3 | no |
 | `XDisplayImpl` | 1 | 1 | yes |
 | `XGameEventImpl` | 1 | 1 | yes |
 | `XGameImpl` | 2 | 2 | yes |
@@ -564,10 +559,10 @@ therefore needs no module name beyond the `xgameruntime.dll` it already has, whi
 | `XThreadingImpl` | 18 | 17 | yes |
 | `XUserImpl` | 21 | 21 | yes |
 
-"Served" is the tool's answer for the runtime sources on this branch (`served_classes` over every `runtime/shims/*.cpp`):
-every class in the table is served now, `XAppCaptureImpl` and `XLauncherImpl` included. The executable references the
-speech-synthesizer slots 8-13, 15, 16 and 21 (slot 14 is not), `XAppCaptureImpl` slot 5 (`XAppCaptureTakeScreenshot`)
-and `XLauncherImpl` slots 3-5 (`XLaunchUri` and the two display timeout-deferral calls). The slots of `XUserImpl`, `XStoreImpl` and `XGameSaveImpl` the
+"Served" is the tool's answer for the runtime sources at that commit. The three that are not: `XAccessibilityImpl`
+(the speech-synthesizer slots 8-13, 15, 16 and 21 are referenced; slot 14 is not), `XAppCaptureImpl` (slot 5,
+`XAppCaptureTakeScreenshot`) and `XLauncherImpl` (slots 3-5: `XLaunchUri` and the two display timeout-deferral calls).
+Open pull requests serve them: #4235, #4307 and #4248. The slots of `XUserImpl`, `XStoreImpl` and `XGameSaveImpl` the
 executable calls, and the argument counts the tool estimates from the registers, are in the report the tool writes.
 `XErrorImpl`, which `XCurl.dll` and `libHttpClient.GDK.dll` call, is not among the executable's classes.
 
@@ -658,12 +653,14 @@ asynchronous paths with `.invalid` names; it opens no connection.
 ## Winsock2 (`ws2_32.dll`) offline
 
 `runtime/shims/ws2_offline.cpp` intercepts outbound Winsock2 entry points — both by name and by standard Windows
-`ws2_32.dll` ordinal (`bind`/`#2`, `connect`/`#4`, `sendto`/`#20`, `gethostbyaddr`/`#51`, `gethostbyname`/`#52`,
+`ws2_32.dll` ordinal (`bind`/`#2`, `connect`/`#4`, `sendto`/`#20`, `setsockopt`/`#21`, `gethostbyaddr`/`#51`,
+`gethostbyname`/`#52`,
 `WSAAsyncGetHostByAddr`/`#102`, `WSAAsyncGetHostByName`/`#103`, `getaddrinfo`, `GetAddrInfoW`, `GetAddrInfoExA/W`,
 `getnameinfo`, `GetNameInfoW`, `WSAConnect`, `WSAConnectByNameA/W`, `WSAConnectByList`, `WSASendTo`, `WSASendMsg`,
-`WSALookupServiceBeginA/W`, and `WSAIoctl` for `WSAID_CONNECTEX` and `WSAID_WSASENDMSG`). `wsock32.dll` maps its
+`WSALookupServiceBeginA/W`, `WSAJoinLeaf`, and `WSAIoctl` for `WSAID_CONNECTEX` and `WSAID_WSASENDMSG`). `wsock32.dll` maps its
 `bind`, `connect`, `sendto`, `gethostbyaddr`, `gethostbyname` and `WSAAsyncGetHostBy*` exports (and their ordinals) to
-the same wrappers, since its exports forward to `ws2_32.dll` natively; like `ws2_32.dll` it stays host-owned
+the same wrappers, since its exports forward to `ws2_32.dll` natively; its `setsockopt` (`#21`) is its own export,
+which takes the Winsock 1.1 option numbers, so it has its own wrapper. Like `ws2_32.dll` it stays host-owned
 (`owns_dll`), so `LoadLibrary` returns the real module. The shim keeps `ws2_32.dll` partially overridden
 so local socket bookkeeping (`WSAStartup`, `socket`, `closesocket`, `select`, `recv`, `send`, byte-order helpers) still
 works for loopback traffic:
@@ -677,6 +674,14 @@ works for loopback traffic:
   (each Winsock provider has its own), after the same loopback check.
 - `bind` narrows wildcard binds (`0.0.0.0`, `::`) to loopback (`127.0.0.1`, `::1`) and refuses other non-loopback
   addresses with `WSAEADDRNOTAVAIL`.
+- A send to a loopback address on an unbound socket (`sendto`, `WSASendTo`, `WSASendMsg`, `WSAJoinLeaf`) would bind it
+  to the wildcard address, as Microsoft's `sendto` remarks describe, and its port would then take datagrams from other
+  hosts. The shim first binds such a socket to `127.0.0.1`, `::1` or `::ffff:127.0.0.1` (matching the destination); if
+  it stays unbound the send fails with `WSAEADDRNOTAVAIL`.
+- Multicast group joins through `setsockopt` (`IP_ADD_MEMBERSHIP`, `IP_ADD_SOURCE_MEMBERSHIP`, `IPV6_ADD_MEMBERSHIP`,
+  `MCAST_JOIN_GROUP`, `MCAST_JOIN_SOURCE_GROUP`, and `wsock32.dll`'s Winsock 1.1 `IP_ADD_MEMBERSHIP` = 5) fail with
+  `WSAEADDRNOTAVAIL`; other options pass through. `WSAJoinLeaf` gets the same loopback check as `connect`, so a group
+  address is refused with `WSAENETUNREACH`.
 - Forward lookups refuse external names with `WSAHOST_NOT_FOUND` without sending DNS traffic. A dotted octet with a
   leading zero (`0127.0.0.1`) is refused too: Windows reads it as octal, so it is not the loopback address it looks
   like. `getnameinfo` / `GetNameInfoW` force `NI_NUMERICHOST` (or return `WSAHOST_NOT_FOUND` under `NI_NAMEREQD`) for
@@ -686,7 +691,8 @@ works for loopback traffic:
 `runtime/test/ws2_offline_test.cpp` (ctest `ws2_offline`) verifies name and ordinal bindings, the `wsock32.dll`
 aliases, external refusals using RFC 5737 / RFC 3849 / `.invalid` targets, the `0127.0.0.1` refusal, the
 `WSASERVICE_NOT_FOUND` refusal, wildcard-bind narrowing, a `ConnectEx` pointer from `WSAIoctl` connecting to a loopback
-listener, and a local loopback UDP round-trip.
+listener, a local loopback UDP round-trip, loopback binds for sends on unbound UDP sockets (with a control showing
+the host's own `sendto` binds to `0.0.0.0`), and the multicast and `WSAJoinLeaf` refusals.
 
 ## What this proves and what it does not
 

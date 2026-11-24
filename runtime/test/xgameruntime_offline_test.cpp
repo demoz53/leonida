@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 #include <XAsync.h>
 #include <XAsyncProvider.h>
@@ -74,7 +75,16 @@ constexpr GUID kAccessibilityClass = {0x3e241977, 0x6237, 0x41e9, {0x85, 0x59, 0
 constexpr GUID kAccessibility2 = {0xd722b373, 0x8c4d, 0x4692, {0x9e, 0x51, 0xd6, 0xad, 0x9b, 0x37, 0xaa, 0x7d}};
 constexpr GUID kLauncherClass = {0x1b339674, 0x328d, 0x4283, {0xa2, 0x00, 0x31, 0x71, 0xf1, 0x8d, 0x36, 0x39}};
 
-using EnumVoices = HRESULT(STDMETHODCALLTYPE*)(void*, void*, void*);
+struct VoiceInformation {   // XSpeechSynthesizerVoiceInformation, the GDK reference's member order
+    const char* description;
+    const char* display_name;
+    uint32_t gender;
+    const char* voice_id;
+    const char* language;
+};
+using VoiceCallback = bool(CALLBACK*)(const VoiceInformation*, void*);
+using EnumVoices = HRESULT(STDMETHODCALLTYPE*)(void*, void* context, VoiceCallback callback);
+using SetCustomVoice = HRESULT(STDMETHODCALLTYPE*)(void*, void*, const char*);
 using SpeechCreate = HRESULT(STDMETHODCALLTYPE*)(void*, void**);
 using SpeechClose = HRESULT(STDMETHODCALLTYPE*)(void*, void*);
 using SpeechStream = HRESULT(STDMETHODCALLTYPE*)(void*, void*, const char*, void**);
@@ -92,6 +102,19 @@ void* user_object(HRESULT(WINAPI* query)(const GUID*, REFIID, void**)) {
 }
 
 void CALLBACK on_state(void*, uint64_t, uint32_t) {}
+
+struct VoicesSeen {
+    int count = 0;
+    std::string voice_id;
+    std::string language;
+};
+bool CALLBACK on_voice(const VoiceInformation* info, void* context) {
+    auto* seen = static_cast<VoicesSeen*>(context);
+    ++seen->count;
+    seen->voice_id = info && info->voice_id ? info->voice_id : "";
+    seen->language = info && info->language ? info->language : "";
+    return true;
+}
 
 // XUserDeviceImpl slots 4/5 (device association) and 7/8 (default audio endpoint): kept until unregistered, never
 // called back offline.
@@ -290,9 +313,12 @@ int main() {
           "XHighContrastGetMode reports Off");
     check(at<SetEnabled>(acc, 4)(acc, true) == S_OK, "XClosedCaptionSetEnabled is accepted");
     check(FAILED(at<NoArgs>(acc, 3)(acc)), "the closed-caption properties are not available offline");
-    check(at<EnumVoices>(acc, 8)(acc, reinterpret_cast<void*>(&on_state), nullptr) == S_OK &&
-              at<EnumVoices>(acc, 8)(acc, nullptr, nullptr) == E_INVALIDARG,
-          "XSpeechSynthesizerEnumerateInstalledVoices: no voices, S_OK (a callback is required)");
+    VoicesSeen seen;
+    check(at<EnumVoices>(acc, 8)(acc, &seen, &on_voice) == S_OK && seen.count == 1 &&
+              seen.voice_id == "leonida-silent" && seen.language == "en-US",
+          "XSpeechSynthesizerEnumerateInstalledVoices(context, callback): one silent voice, its context passed back");
+    check(at<EnumVoices>(acc, 8)(acc, nullptr, nullptr) == E_INVALIDARG,
+          "XSpeechSynthesizerEnumerateInstalledVoices: a callback is required");
     void* synth = nullptr;
     check(at<SpeechCreate>(acc, 9)(acc, &synth) == S_OK && synth != nullptr &&
               at<SpeechCreate>(acc, 9)(acc, nullptr) == E_POINTER,
@@ -303,6 +329,10 @@ int main() {
               at<SpeechClose>(acc, 12)(acc, nullptr) == E_INVALIDARG && at<SpeechClose>(acc, 14)(acc, nullptr) == E_INVALIDARG,
           "close and set-voice calls on a null handle: E_INVALIDARG");
     check(at<SpeechClose>(acc, 11)(acc, synth) == S_OK, "XSpeechSynthesizerSetDefaultVoice succeeds on valid handle");
+    check(at<SetCustomVoice>(acc, 12)(acc, synth, seen.voice_id.c_str()) == S_OK &&
+              at<SetCustomVoice>(acc, 12)(acc, synth, "not-installed") == E_INVALIDARG &&
+              at<SetCustomVoice>(acc, 12)(acc, synth, nullptr) == E_INVALIDARG,
+          "XSpeechSynthesizerSetCustomVoice accepts the enumerated voice only");
     check(at<SpeechStream>(acc, 13)(acc, nullptr, "hi", &stream) == E_INVALIDARG && stream == nullptr,
           "CreateStreamFromText on a null synthesizer: E_INVALIDARG, no stream");
     check(at<SpeechStream>(acc, 13)(acc, synth, "Hello", &stream) == S_OK && stream != nullptr,
@@ -349,20 +379,6 @@ int main() {
     void* none = reinterpret_cast<void*>(1);
     check(query(&kLauncherClass, other, &none) == E_NOINTERFACE && none == nullptr,
           "XLauncherImpl refuses an interface id it doesn't implement");
-
-    // ---- XAppCapture ----
-    const GUID kAppCaptureClass = {0xa4f1aee2, 0x4bf1, 0x4485, {0xb0, 0x08, 0xa7, 0xc2, 0x6d, 0x52, 0xac, 0x27}};
-    const GUID kAppCaptureIid = {0x22e672d7, 0xb4e3, 0x406c, {0xbd, 0x50, 0x8f, 0x0d, 0x25, 0x23, 0x6f, 0x9e}};
-    void* capture = nullptr;
-    void* capture_iid = nullptr;
-    check(query(&kAppCaptureClass, kAppCaptureClass, &capture) == S_OK && capture &&
-              query(&kAppCaptureClass, kAppCaptureIid, &capture_iid) == S_OK && capture_iid == capture,
-          "XAppCaptureImpl answers its class id and interface id");
-    if (capture) {
-        using TakeShot = HRESULT(STDMETHODCALLTYPE*)(void*, void*, void*);
-        check(at<TakeShot>(capture, 5)(capture, nullptr, nullptr) == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED),
-              "XAppCaptureTakeScreenshot returns ERROR_NOT_SUPPORTED offline");
-    }
 
     std::printf("xgameruntime_offline_test: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

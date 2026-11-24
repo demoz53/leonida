@@ -127,8 +127,8 @@ int main() {
     vk.query_pool = [&](QueryHeapId id) -> QueryPool* {
         return id == 1 ? &heap : id == 6 ? &statistics_heap : nullptr;
     };
-    vk.sum_statistics = [](VkCommandBuffer, VkQueryPool pool, VkQueryPool, const std::uint8_t*, std::uint32_t first,
-                           std::uint32_t count, VkBuffer, VkDeviceSize) {
+    vk.sum_statistics = [](VkCommandBuffer, VkQueryPool pool, VkQueryPool, VkQueryPool, const std::uint8_t*,
+                           std::uint32_t first, std::uint32_t count, VkBuffer, VkDeviceSize) {
         g_trace->events.push_back(query_event("sum_statistics", pool, first) + "+" + std::to_string(count));
     };
     vk.resolve_binary_occlusion = [](VkCommandBuffer, VkQueryPool, std::uint32_t, std::uint32_t, VkBuffer,
@@ -685,14 +685,18 @@ int main() {
         auto segments = std::make_shared<OcclusionSegmentPool>();
         segments->pool = handle<VkQueryPool>(9);
         segments->mesh_pool = handle<VkQueryPool>(10);
+        segments->primitives_pool = handle<VkQueryPool>(11);
         segments->mesh = prepared.statistics_mesh;
         segments->destroy = mock_destroy_pool;
         QueryReplay queries;
         expect(queries.plan(prepared, {}, 0, true, segments, 0) == ReplayResult::success, "plan mixed list");
         expect(prepared.statistics_mesh_pool == handle<VkQueryPool>(10), "mixed list: the mesh pool is the list's");
+        expect(prepared.statistics_primitives_pool == handle<VkQueryPool>(11),
+               "mixed list: the mesh-primitives pool is the list's");
         expect(q[6].resolves.size() == 1 && q[6].resolves[0].sum && q[6].resolves[0].first == 3 &&
                    q[6].resolves[0].count == 1 && q[6].resolves[0].mesh_pool == handle<VkQueryPool>(10) &&
-                   q[6].resolves[0].mesh && q[6].resolves[0].mesh[3] == 1,
+                   q[6].resolves[0].primitives_pool == handle<VkQueryPool>(11) && q[6].resolves[0].mesh &&
+                   q[6].resolves[0].mesh[3] == 1,
                "mixed list: the mesh-only query's resolve sums its one mesh segment");
         expect(queries.needs_statistics_sum, "mixed list: the statistics sum helper is needed");
 

@@ -3,7 +3,8 @@
 // Resolves every shimmed symbol through rt::shims::find under ws2_32.dll (by name and by standard Windows ordinal),
 // checks that wsock32.dll resolves its shared entries to the same wrappers, and verifies that external addresses
 // (RFC 5737 192.0.2.1 / RFC 3849 2001:db8::1), .invalid hostnames, octal-looking 0127.0.0.1 and name-service queries
-// are refused in-process while loopback (127.0.0.1 / ::1 / localhost) still works. Nothing touches the network.
+// are refused in-process while loopback (127.0.0.1 / ::1 / localhost) still works. Sends on unbound UDP sockets bind
+// them to loopback, and multicast joins (setsockopt on both DLLs, WSAJoinLeaf) are refused. Nothing touches the network.
 #ifndef _WINSOCK_DEPRECATED_NO_WARNINGS
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #endif
@@ -421,6 +422,123 @@ int main() {
         closesocket(ext);
         closesocket(client);
         closesocket(listener);
+    }
+
+    // Implicit binds, multicast joins and WSAJoinLeaf. A send on an unbound datagram socket binds it to the wildcard
+    // address (Microsoft's sendto remarks); the shim binds it to loopback first. Joins are refused before the host.
+    {
+        using SetSockOptFn = int(WSAAPI*)(SOCKET, int, int, const char*, int);
+        using JoinLeafFn = SOCKET(WSAAPI*)(SOCKET, const sockaddr*, int, LPWSABUF, LPWSABUF, LPQOS, LPQOS, DWORD);
+        const auto sh_setsockopt = resolve<SetSockOptFn>("setsockopt");
+        const auto sh_join_leaf = resolve<JoinLeafFn>("WSAJoinLeaf");
+        const auto ws1_setsockopt = reinterpret_cast<SetSockOptFn>(rt::shims::find("wsock32.dll", "setsockopt"));
+        check(sh_setsockopt && sh_setsockopt == resolve<SetSockOptFn>("#21"),
+              "setsockopt and #21 resolve to the same shim");
+        check(sh_join_leaf != nullptr, "WSAJoinLeaf resolves to a shim");
+        check(ws1_setsockopt && ws1_setsockopt == reinterpret_cast<SetSockOptFn>(rt::shims::find("wsock32.dll", "#21")) &&
+                  ws1_setsockopt != sh_setsockopt,
+              "wsock32.dll setsockopt and #21 resolve to their own Winsock 1.1 shim");
+
+        const SOCKET receiver = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        sockaddr_in to = make_v4(127, 0, 0, 1, 0);
+        int to_len = sizeof(to);
+        check(bind(receiver, reinterpret_cast<const sockaddr*>(&to), sizeof(to)) == 0 &&
+                  getsockname(receiver, reinterpret_cast<sockaddr*>(&to), &to_len) == 0,
+              "bind a loopback UDP receiver");
+        const auto local_v4_first_byte = [](SOCKET s) {
+            sockaddr_in local{};
+            int len = sizeof(local);
+            if (getsockname(s, reinterpret_cast<sockaddr*>(&local), &len) != 0 || local.sin_port == 0) return -1;
+            return static_cast<int>(reinterpret_cast<const uint8_t*>(&local.sin_addr)[0]);
+        };
+        char payload[] = "ping";
+
+        const SOCKET control = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        check(sendto(control, payload, 4, 0, reinterpret_cast<const sockaddr*>(&to), sizeof(to)) == 4 &&
+                  local_v4_first_byte(control) == 0,
+              "control: the host sendto binds an unbound UDP socket to 0.0.0.0");
+        const SOCKET unbound = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        check(sh_sendto(unbound, payload, 4, 0, reinterpret_cast<const sockaddr*>(&to), sizeof(to)) == 4 &&
+                  local_v4_first_byte(unbound) == 127,
+              "sendto binds an unbound UDP socket to 127.0.0.1 before sending");
+        const SOCKET unbound_wsa = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        WSABUF wbuf{4, payload};
+        DWORD sent = 0;
+        check(sh_wsa_sendto(unbound_wsa, &wbuf, 1, &sent, 0, reinterpret_cast<const sockaddr*>(&to), sizeof(to), nullptr,
+                            nullptr) == 0 &&
+                  sent == 4 && local_v4_first_byte(unbound_wsa) == 127,
+              "WSASendTo binds an unbound UDP socket to 127.0.0.1 before sending");
+        check(sh_sendto(unbound, payload, 4, 0, reinterpret_cast<const sockaddr*>(&to), sizeof(to)) == 4 &&
+                  local_v4_first_byte(unbound) == 127,
+              "a second sendto on the now-bound socket keeps its loopback binding");
+
+        const SOCKET receiver6 = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+        if (receiver6 != INVALID_SOCKET) {
+            sockaddr_in6 to6{};
+            to6.sin6_family = AF_INET6;
+            reinterpret_cast<uint8_t*>(&to6.sin6_addr)[15] = 1;  // ::1
+            int to6_len = sizeof(to6);
+            const bool bound6 = bind(receiver6, reinterpret_cast<const sockaddr*>(&to6), sizeof(to6)) == 0 &&
+                                getsockname(receiver6, reinterpret_cast<sockaddr*>(&to6), &to6_len) == 0;
+            const SOCKET unbound6 = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+            sockaddr_in6 local6{};
+            int local6_len = sizeof(local6);
+            check(bound6 && sh_sendto(unbound6, payload, 4, 0, reinterpret_cast<const sockaddr*>(&to6), sizeof(to6)) == 4 &&
+                      getsockname(unbound6, reinterpret_cast<sockaddr*>(&local6), &local6_len) == 0 &&
+                      reinterpret_cast<const uint8_t*>(&local6.sin6_addr)[15] == 1 &&
+                      reinterpret_cast<const uint8_t*>(&local6.sin6_addr)[0] == 0,
+                  "sendto binds an unbound IPv6 UDP socket to ::1 before sending");
+            closesocket(unbound6);
+            closesocket(receiver6);
+        }
+
+        // 239.255.0.1 (administratively scoped group); every join is refused before it reaches the host.
+        ip_mreq mreq{};
+        auto* group = reinterpret_cast<uint8_t*>(&mreq.imr_multiaddr);
+        group[0] = 239;
+        group[1] = 255;
+        group[3] = 1;
+        const auto refused = [](int rc) { return rc == SOCKET_ERROR && WSAGetLastError() == WSAEADDRNOTAVAIL; };
+        const char* mreq_bytes = reinterpret_cast<const char*>(&mreq);
+        WSASetLastError(0);
+        check(refused(sh_setsockopt(unbound, IPPROTO_IP, IP_ADD_MEMBERSHIP, mreq_bytes, sizeof(mreq))),
+              "setsockopt refuses IP_ADD_MEMBERSHIP with WSAEADDRNOTAVAIL");
+        WSASetLastError(0);
+        check(refused(sh_setsockopt(unbound, IPPROTO_IP, IP_ADD_SOURCE_MEMBERSHIP, mreq_bytes, sizeof(mreq))),
+              "setsockopt refuses IP_ADD_SOURCE_MEMBERSHIP");
+        WSASetLastError(0);
+        check(refused(sh_setsockopt(unbound, IPPROTO_IP, MCAST_JOIN_GROUP, mreq_bytes, sizeof(mreq))),
+              "setsockopt refuses MCAST_JOIN_GROUP");
+        WSASetLastError(0);
+        check(refused(sh_setsockopt(unbound, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP, mreq_bytes, sizeof(mreq))),
+              "setsockopt refuses IPV6_ADD_MEMBERSHIP");
+        WSASetLastError(0);
+        check(refused(ws1_setsockopt(unbound, IPPROTO_IP, 5, mreq_bytes, sizeof(mreq))),
+              "wsock32 setsockopt refuses the Winsock 1.1 IP_ADD_MEMBERSHIP (5)");
+        WSASetLastError(0);
+        check(refused(ws1_setsockopt(unbound, IPPROTO_IP, IP_ADD_MEMBERSHIP, mreq_bytes, sizeof(mreq))),
+              "wsock32 setsockopt refuses the Winsock 2 IP_ADD_MEMBERSHIP (12) it would pass through");
+        int value = 3;
+        const char* value_bytes = reinterpret_cast<const char*>(&value);
+        check(sh_setsockopt(unbound, IPPROTO_IP, IP_MULTICAST_TTL, value_bytes, sizeof(value)) == 0,
+              "setsockopt passes other IPPROTO_IP options (IP_MULTICAST_TTL)");
+        check(ws1_setsockopt(unbound, IPPROTO_IP, 7, value_bytes, sizeof(value)) == 0,
+              "wsock32 setsockopt passes the Winsock 1.1 IP_TTL (7) to the host's remap");
+        value = 65536;
+        check(sh_setsockopt(unbound, SOL_SOCKET, SO_RCVBUF, value_bytes, sizeof(value)) == 0,
+              "setsockopt passes SOL_SOCKET options");
+
+        const sockaddr_in group_addr = make_v4(239, 255, 0, 1, 5000);
+        WSASetLastError(0);
+        check(sh_join_leaf(unbound, reinterpret_cast<const sockaddr*>(&group_addr), sizeof(group_addr), nullptr, nullptr,
+                           nullptr, nullptr, JL_BOTH) == INVALID_SOCKET &&
+                  WSAGetLastError() == WSAENETUNREACH,
+              "WSAJoinLeaf refuses a multicast group with WSAENETUNREACH");
+
+        closesocket(unbound_wsa);
+        closesocket(unbound);
+        closesocket(control);
+        closesocket(receiver);
     }
 
     WSACleanup();
