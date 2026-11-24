@@ -136,9 +136,16 @@ without it only the plain payload is imported.
 Checked earlier with the shim of the open #279, which used the same layout: four imported blobs (2 KB to 1.2 MB)
 read back byte-identical through its `XGameSaveReadBlobData`.
 
-**VERIFY:** the title's real container and blob names. The default is container = slot name and blob = payload file
-name, and `--map` overrides it. Confirm or fix them from the executable's `XGameSaveCreateContainer` and
-`XGameSaveSubmitBlobWrite` calls.
+**Measured on the executable** (its code and import table, no game data): a container holds two blobs with fixed
+names. `XGameSaveSubmitBlobWrite` is called with `"Save Game Header"` first, a 296-byte header the title builds, then
+`"Save Game Data"` with the payload, and the read path matches exactly those two names and keeps the header only if
+its size is `0x128`. So `saves.py import` writes the payload as `Save Game Data` — `local-user/<container>/Save%20Game%20Data`
+on disk, since a space is %-encoded — and it does not create a header blob: that one is the title's own, and a
+container built only from an import has none until the title writes one.
+
+**Not measured:** the container names. Neither `XGameSaveCreateContainer` call passes a literal; both take
+`[state + 0x288] + index * 0x2c + 2`, a table the title fills at run time, so what it puts there is unread from the
+file. The import's default is still the ASAV slot name, and `--map` overrides container and blob.
 
 ## Key names
 

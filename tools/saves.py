@@ -18,8 +18,9 @@ Commands
                                  of the runtime's offline XGameSave (runtime/shims/xgameruntime_gamesave.cpp):
                                  DIR/local-user/<container>/<blob>, names %-encoded the same way.
                                  DIR defaults to %LOCALAPPDATA%\\Leonida\\saves (the shim's LEONIDA_SAVE_DIR default).
-                                 VERIFY: container/blob names are a guess until the executable shows them; by default
-                                 container = slot name (from the ASAV header), blob = payload file name. Use --map.
+                                 blob = "Save Game Data", the name the executable writes its payload under. Container
+                                 names come from a table the title fills at run time, so they are still a guess; the
+                                 default is the slot name from the ASAV header. Use --map to override either.
 """
 import json
 import os
@@ -32,6 +33,11 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from file_mode import published_mode  # noqa: E402
 from report_paths import same_report_path  # noqa: E402
+
+# The executable submits its save payload under this name: a literal at both `XGameSaveSubmitBlobWrite` call sites,
+# matched again by its read path, which also requires the 296-byte `Save Game Header` blob that precedes it. The
+# header is the title's own and an import cannot make one, so only the data blob is written here.
+SAVE_DATA_BLOB = 'Save Game Data'
 
 # ---------------------------------------------------------------------------------------------- ASAV
 ASAV_HDR = 0x170          # header size seen on every plain ASAV file
@@ -648,12 +654,13 @@ def import_saves(args):
     if out is None:
         out = os.path.join(os.environ.get('LOCALAPPDATA', '.'), 'Leonida', 'saves')
     root = os.path.join(out, 'local-user')
-    manifest = {'note': 'VERIFY: container/blob names are a guess until the executable shows them',
+    manifest = {'note': 'blob names are measured ("Save Game Data"; the title also writes its own 296-byte '
+                        '"Save Game Header"), container names are not',
                 'layout': '<LEONIDA_SAVE_DIR>/local-user/<container>/<blob>', 'entries': []}
     plan = []
     for folder in folders:
         sd, payload, slot, title = save_slot(folder)
-        container, blob = slot, payload
+        container, blob = slot, SAVE_DATA_BLOB
         for key in (sd, payload, slot):
             if key in maps:
                 container = maps[key][0] or container

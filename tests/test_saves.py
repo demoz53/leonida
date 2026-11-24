@@ -657,10 +657,13 @@ class ImportTest(unittest.TestCase):
             out = os.path.join(tmp, "saves")
             quiet(saves.import_saves, [story, prof, "--out", out])
             # slot name comes from the packed copy's ASAV header when there is one
-            self.assertEqual(rd(os.path.join(out, "local-user", "SLOT3", "SLOT0")), jsav)
-            self.assertTrue(os.path.isfile(os.path.join(out, "local-user", "Player", "Player")))
+            self.assertEqual(rd(os.path.join(out, "local-user", "SLOT3", "Save%20Game%20Data")), jsav)
+            self.assertTrue(os.path.isfile(os.path.join(out, "local-user", "Player", "Save%20Game%20Data")))
             m = rd_json(os.path.join(out, "import-manifest.json"))
             self.assertEqual(sorted(e["container"] for e in m["entries"]), ["Player", "SLOT3"])
+            # The executable writes its payload as "Save Game Data" (a literal at both SubmitBlobWrite call sites),
+            # not under the payload's file name, so an import the title can read has to land on that name.
+            self.assertEqual({e["blob"] for e in m["entries"]}, {"Save Game Data"})
             self.assertFalse(any(n.startswith("~") for _, _, fs in os.walk(out) for n in fs))
 
     def test_map_dry_run_force_and_collision(self):
