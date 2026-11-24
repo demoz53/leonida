@@ -68,6 +68,31 @@ def read_iids(header: str) -> dict[str, uuid.UUID]:
     return {name: uuid.UUID(guid) for guid, name in MIDL.findall(text)}
 
 
+def read_gdk_guids(path: str) -> dict[str, uuid.UUID]:
+    """Load GDK runtime class/interface GUIDs from tools/gdk_runtime_classes.json."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, uuid.UUID] = {}
+    for section in ("classes", "interfaces"):
+        entries = doc.get(section)
+        if not isinstance(entries, dict):
+            continue
+        for name, info in entries.items():
+            if not isinstance(info, dict):
+                continue
+            raw_id = info.get("id")
+            if not isinstance(raw_id, str):
+                continue
+            try:
+                out[name] = uuid.UUID(raw_id)
+            except ValueError:
+                continue
+    return out
+
+
 class Image:
     """A parsed PE32/PE32+ image: sections, the image base and the import directory."""
 
@@ -373,6 +398,9 @@ def main(argv: list[str] | None = None) -> int:
                 ap.error(f"--json {args.json} would overwrite the input {source}")
 
     known: dict[str, uuid.UUID] = {}
+    gdk_json = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gdk_runtime_classes.json")
+    if os.path.isfile(gdk_json):
+        known.update(read_gdk_guids(gdk_json))
     if header and os.path.isfile(header):
         known.update(read_iids(header))
     for pair in args.known:
