@@ -8,27 +8,18 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, NamedTuple
 
 
 ROOT = Path(__file__).resolve().parents[1]
 BOOT_TRACE = "tools/boot_trace.py"
 GUEST_SCENE = "scripts/run_guest_scene.py"
-
-
-class Tool(NamedTuple):
-    name: str
-    path: str
-    requirements: tuple[str, ...]
-
-
 TOOLS = (
-    Tool(
+    (
         "boot-trace",
         BOOT_TRACE,
         ("Python 3", "Startup JSONL from gta6rt --trace or stderr from gta6rt --trace-d3d12"),
     ),
-    Tool(
+    (
         "guest-scene",
         GUEST_SCENE,
         (
@@ -41,28 +32,16 @@ TOOLS = (
 )
 
 
-def producer_argv(script: Path, args: list[str]) -> list[str]:
-    """Build the command line used to launch a producer script."""
-    argv = [sys.executable, "-I"]
-    if os.name == "nt":
-        # -I ignores PYTHONUTF8/PYTHONIOENCODING, so a redirected stdout would
-        # fall back to the ANSI code page. -X options are not ignored by -I.
-        argv += ["-X", "utf8"]
-    return [*argv, str(script), *args]
-
-
-def discover() -> dict[str, Any]:
+def discover() -> dict:
     tools = []
-    for tool in TOOLS:
-        script = ROOT / tool.path
-        present = script.is_file()
+    for name, path, requirements in TOOLS:
+        present = (ROOT / path).is_file()
         tools.append({
-            "id": tool.name,
-            "path": tool.path,
-            # Absolute, so the command works from any working directory.
-            "help_argv": producer_argv(script, ["--help"]) if present else None,
+            "id": name,
+            "path": path,
             "present": present,
-            "requirements": tool.requirements,
+            "help_argv": [sys.executable, "-I", path, "--help"] if present else None,
+            "requirements": requirements,
         })
     return {
         "schema_version": 1,
@@ -81,24 +60,19 @@ def format_help_command(argv: list[str]) -> str:
     return shlex.join(argv)
 
 
-def normalize_returncode(code: int) -> int:
-    """Map a negative POSIX return code (killed by signal N) to 128 + N."""
-    return 128 + -code if code < 0 else code
-
-
 def run_producer(relative_path: str, args: list[str]) -> int:
     producer = ROOT / relative_path
     if not producer.is_file():
         print(f"error: {relative_path} is missing; use a complete Leonida checkout", file=sys.stderr)
         return 2
     try:
-        completed = subprocess.run(producer_argv(producer, args), cwd=Path.cwd())
-    except KeyboardInterrupt:
-        return 130
+        return subprocess.run(
+            [sys.executable, "-I", str(producer), *args],
+            cwd=Path.cwd(),
+        ).returncode
     except OSError as exc:
         print(f"error: could not run {relative_path}: {exc}", file=sys.stderr)
         return 2
-    return normalize_returncode(completed.returncode)
 
 
 def guest_scene(args: list[str]) -> int:
@@ -125,16 +99,16 @@ def main() -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     inventory = commands.add_parser("discover", help="list producer scripts and their requirements")
     inventory.add_argument("--json", action="store_true", help="write a JSON inventory to stdout")
-    # boot-trace and guest-scene are forwarded above; they are registered only so they show up in --help.
     commands.add_parser("boot-trace", help="summarize startup and D3D12 boot traces")
     commands.add_parser("guest-scene", help="run the synthetic guest scene with a required --out")
     args = parser.parse_args(argv)
 
     result = discover()
-    if getattr(args, "json", False):
+    if args.json:
         print(json.dumps(result, indent=2))
     else:
-        print("Help commands use absolute paths; tool paths are relative to the Leonida checkout root.")
+        sys.stdout.reconfigure(encoding="utf-8")
+        print("Paths and help commands are relative to the Leonida checkout root.")
         for tool in result["tools"]:
             status = "present" if tool["present"] else "missing"
             print(f"{tool['id']}: {tool['path']} ({status})")
@@ -148,13 +122,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    # A redirected stdout is strict ANSI code page under -I. Configure it once, up front:
-    # UTF-8, writing '?' for anything it still cannot encode.
-    try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    try:  # a redirected stdout is strict ANSI code page under -I; write '?' for what it cannot encode
+        sys.stdout.reconfigure(errors="replace")
     except (AttributeError, ValueError, OSError):
         pass
-    try:
-        raise SystemExit(main())
-    except KeyboardInterrupt:
-        raise SystemExit(130)
+    raise SystemExit(main())
