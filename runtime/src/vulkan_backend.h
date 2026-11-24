@@ -1001,7 +1001,7 @@ public:
         // binding's host pointer is null on DEFAULT and READBACK heaps, whose mapped bytes the GPU can write.
         replay_.host_at = [this](std::uint64_t va, std::uint64_t bytes, const std::uint8_t*& host) {
             BufferVaIndex<ResourceId>::Hit hit{};
-            if (!buffer_vas_.find(va, hit)) return HostReadStatus::absent;
+            if (!buffer_vas_.find(va, hit, bytes)) return HostReadStatus::absent;
             const ResourceBinding* b = resolve(hit.id);
             if (!b) return HostReadStatus::absent;
             if (!b->host) return HostReadStatus::not_cpu_written;
