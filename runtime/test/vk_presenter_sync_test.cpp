@@ -62,6 +62,21 @@ PFN_vkCmdPipelineBarrier real_barrier = nullptr;
 PFN_vkCmdCopyImageToBuffer real_copy_i2b = nullptr;
 PFN_vkDestroySwapchainKHR real_destroy_swapchain = nullptr;
 PFN_vkDeviceWaitIdle real_device_wait_idle = nullptr;
+PFN_vkGetPhysicalDeviceSurfaceFormatsKHR real_formats = nullptr;
+PFN_vkCreateSwapchainKHR real_create_swapchain = nullptr;
+std::atomic<VkResult> next_formats{VK_SUCCESS}, next_create{VK_SUCCESS};
+
+VKAPI_ATTR VkResult VKAPI_CALL surface_formats(VkPhysicalDevice gpu, VkSurfaceKHR surface,
+                                                std::uint32_t* count, VkSurfaceFormatKHR* formats) {
+    const VkResult result = next_formats.exchange(VK_SUCCESS);
+    return result == VK_SUCCESS ? real_formats(gpu, surface, count, formats) : result;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL create_swapchain(VkDevice device, const VkSwapchainCreateInfoKHR* info,
+                                                const VkAllocationCallbacks* allocator, VkSwapchainKHR* out) {
+    const VkResult result = next_create.exchange(VK_SUCCESS);
+    return result == VK_SUCCESS ? real_create_swapchain(device, info, allocator, out) : result;
+}
 
 std::atomic<VkResult> fail_next_submit{VK_SUCCESS};
 std::atomic<VkResult> fail_next_wait{VK_SUCCESS};
@@ -155,6 +170,7 @@ VKAPI_ATTR void VKAPI_CALL cmd_copy_image_to_buffer(VkCommandBuffer cb, VkImage 
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL get_device(VkDevice device, const char* name) {
     const std::string_view n = name;
+    if (n == "vkCreateSwapchainKHR") return reinterpret_cast<PFN_vkVoidFunction>(create_swapchain);
     if (n == "vkDestroySwapchainKHR") return reinterpret_cast<PFN_vkVoidFunction>(destroy_swapchain);
     if (n == "vkQueueSubmit") return reinterpret_cast<PFN_vkVoidFunction>(queue_submit);
     if (n == "vkQueuePresentKHR") return reinterpret_cast<PFN_vkVoidFunction>(queue_present);
@@ -165,6 +181,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL get_device(VkDevice device, const char*
 }
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL get_instance(VkInstance instance, const char* name) {
+    if (std::string_view(name) == "vkGetPhysicalDeviceSurfaceFormatsKHR")
+        return reinterpret_cast<PFN_vkVoidFunction>(surface_formats);
     if (std::string_view(name) == "vkGetDeviceProcAddr") return reinterpret_cast<PFN_vkVoidFunction>(get_device);
     return real_get_instance(instance, name);
 }
@@ -172,6 +190,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL get_instance(VkInstance instance, const
 void install(PFN_vkGetInstanceProcAddr instance_proc, VkInstance instance, VkDevice device) {
     real_get_instance = instance_proc;
     real_get_device = reinterpret_cast<PFN_vkGetDeviceProcAddr>(instance_proc(instance, "vkGetDeviceProcAddr"));
+    real_formats = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceFormatsKHR>(instance_proc(instance, "vkGetPhysicalDeviceSurfaceFormatsKHR"));
+    real_create_swapchain = reinterpret_cast<PFN_vkCreateSwapchainKHR>(real_get_device(device, "vkCreateSwapchainKHR"));
     real_destroy_swapchain = reinterpret_cast<PFN_vkDestroySwapchainKHR>(real_get_device(device, "vkDestroySwapchainKHR"));
     real_device_wait_idle = reinterpret_cast<PFN_vkDeviceWaitIdle>(real_get_device(device, "vkDeviceWaitIdle"));
     real_submit = reinterpret_cast<PFN_vkQueueSubmit>(real_get_device(device, "vkQueueSubmit"));
@@ -252,9 +272,21 @@ int main() {
         VkSurfaceKHR surface = VK_NULL_HANDLE;
         EXPECT(create_surface(d.instance, &surface_info, nullptr, &surface) == VK_SUCCESS);
 
-        VulkanPresenter presenter(context, driver::get_instance, d.instance, d.physical, d.queue, d.family, surface);
+        unsigned surface_attempts = 0;
+        bool window_available = true;
+        const auto replace_surface = [&]() -> VkSurfaceKHR {
+            ++surface_attempts;
+            VkSurfaceKHR fresh{};
+            if (window_available) create_surface(d.instance, &surface_info, nullptr, &fresh);
+            return fresh;
+        };
+        driver::next_formats = VK_ERROR_SURFACE_LOST_KHR;
+        VulkanPresenter presenter(context, driver::get_instance, d.instance, d.physical, d.queue, d.family, surface,
+                                  false, nullptr, replace_surface);
         EXPECT(presenter.ok());
         EXPECT(presenter.enable_capture());
+        EXPECT(presenter.present_blank(true) == VK_SUCCESS);
+        EXPECT(surface_attempts == 1 && presenter.presented() == 1);
 
         // 1. Failed vkQueueSubmit must NOT commit the UNDEFINED -> GENERAL transition in LayoutTracker (O(1) rollback
         //    even with many live tracked textures), and tracker_mutex_ must be released before vkQueuePresentKHR.
@@ -341,6 +373,31 @@ int main() {
         const bool bgra = (fmt == VK_FORMAT_B8G8R8A8_UNORM || fmt == VK_FORMAT_B8G8R8A8_SRGB);
         EXPECT(presenter_capture_matches_clear(pixels, ext.width, ext.height, bgra));
         std::printf("presenter sync: capture-buffer WAW barriers (4/4) and full-frame read_back ok\n");
+
+        // Losing the surface while replacing a live swapchain invalidates the capture. The
+        // retained window may be unavailable for a frame before a new surface can be made.
+        const auto before_loss = presenter.presented();
+        window_available = false;
+        driver::next_create = VK_ERROR_SURFACE_LOST_KHR;
+        EXPECT(presenter.present(1, false) == VK_SUCCESS);
+        EXPECT(presenter.presented() == before_loss && !presenter.read_back(pixels, &ext, &fmt));
+        EXPECT(presenter.present(1, false) == VK_SUCCESS);
+        EXPECT(surface_attempts == 2 && presenter.presented() == before_loss);
+        window_available = true;
+        EXPECT(presenter.present(1, true) == VK_SUCCESS);
+        EXPECT(surface_attempts == 3 && presenter.presented() == before_loss + 1);
+        EXPECT(presenter.read_back(pixels, &ext, &fmt));
+        EXPECT(presenter_capture_matches_clear(pixels, ext.width, ext.height, bgra));
+
+        // An ordinary creation failure is retried on the existing surface.
+        driver::next_create = VK_ERROR_OUT_OF_HOST_MEMORY;
+        EXPECT(presenter.present(1, false) == VK_ERROR_OUT_OF_DATE_KHR);
+        EXPECT(presenter.present(1, true) == VK_SUCCESS);
+        EXPECT(surface_attempts == 3 && presenter.presented() == before_loss + 2);
+        EXPECT(presenter.read_back(pixels, &ext, &fmt));
+        EXPECT(presenter_capture_matches_clear(pixels, ext.width, ext.height, bgra));
+        std::printf("presenter sync: recovered lost startup and replacement surfaces, %ux%u pixels matched\n",
+                    ext.width, ext.height);
 
         // 2b. A Present behind held work shows what that work draws (queue_holds.h). The render waits for a gate with
         //     no submitted Signal, so the queue holds it; the presents are queued behind it instead of blitting the

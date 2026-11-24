@@ -117,7 +117,7 @@ public:
                     bool swapchain_maintenance1 = false,
                     std::function<VkExtent2D()> extent_fn = nullptr,
                     std::function<VkSurfaceKHR()> recreate_surface_fn = nullptr)
-        : context_(context), instance_(instance), physical_(physical), queue_(queue), surface_(surface),
+        : context_(context), instance_(instance), physical_(physical), queue_(queue), family_(family), surface_(surface),
           maintenance1_(swapchain_maintenance1), extent_fn_(std::move(extent_fn)),
           recreate_surface_fn_(std::move(recreate_surface_fn)) {
 #define LEONIDA_INSTANCE_FN(name) name##_ = reinterpret_cast<PFN_##name>(get_instance(instance, #name));
@@ -147,10 +147,6 @@ public:
         LEONIDA_DEVICE_FN(vkResetFences)
 #undef LEONIDA_DEVICE_FN
         if (!vkCreateSwapchainKHR_ || !vkQueuePresentKHR_ || !vkCmdBlitImage_ || !vkCreateFence_) return;
-
-        VkBool32 supported = VK_FALSE;
-        vkGetPhysicalDeviceSurfaceSupportKHR_(physical, family, surface, &supported);
-        if (!supported) return;
 
         auto& vk = context.vk;
         VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
@@ -1137,10 +1133,19 @@ private:
                      extent.height, mean[0], mean[1], mean[2]);
     }
 
+    // A lost surface cannot become usable by retrying swapchain creation on the same handle.
+    // Leave the presenter ready to recreate the window surface on the next frame.
+    bool defer_surface_loss(VkResult result) {
+        if (result != VK_ERROR_SURFACE_LOST_KHR) return false;
+        mark_surface_lost();
+        return bool(recreate_surface_fn_);
+    }
+
     // (Re)creates the swapchain for the surface's current size. A zero-sized surface (minimised) leaves no
     // swapchain and is retried on the next present. Keep the old swapchain until the surface queries succeed and
     // the replacement can be attempted. An incomplete replacement stays stale so the next present tries again.
     bool recreate(bool vsync, bool srgb, bool hdr = false) {
+        if (surface_lost_) return bool(recreate_surface_fn_);  // enable_capture before the window returns
         auto& vk = context_.vk;
         const VkDevice device = context_.device();
         {
@@ -1150,8 +1155,12 @@ private:
         if (finish_pending_capture() != VK_SUCCESS) return false;
         stale_ = true;  // until this succeeds
         tear_mode_ = VK_PRESENT_MODE_MAX_ENUM_KHR;
+        VkBool32 supported = VK_FALSE;
+        VkResult result = vkGetPhysicalDeviceSurfaceSupportKHR_(physical_, family_, surface_, &supported);
+        if (result != VK_SUCCESS || !supported) return defer_surface_loss(result);
         VkSurfaceCapabilitiesKHR caps{};
-        if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR_(physical_, surface_, &caps) != VK_SUCCESS) return false;
+        result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR_(physical_, surface_, &caps);
+        if (result != VK_SUCCESS) return defer_surface_loss(result);
         VkExtent2D extent = caps.currentExtent;
         // When the platform leaves the swapchain extent to the application (0xFFFFFFFF, as on Intel UHD / Win32 WSI),
         // query the window client area or fall back to the last known extent, and clamp to the surface bounds (D3D-165).
@@ -1191,11 +1200,11 @@ private:
         if (caps.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
         std::uint32_t count = 0;
-        if (vkGetPhysicalDeviceSurfaceFormatsKHR_(physical_, surface_, &count, nullptr) != VK_SUCCESS || !count)
-            return false;
+        result = vkGetPhysicalDeviceSurfaceFormatsKHR_(physical_, surface_, &count, nullptr);
+        if (result != VK_SUCCESS || !count) return defer_surface_loss(result);
         std::vector<VkSurfaceFormatKHR> formats(count);
-        if (vkGetPhysicalDeviceSurfaceFormatsKHR_(physical_, surface_, &count, formats.data()) != VK_SUCCESS || !count)
-            return false;
+        result = vkGetPhysicalDeviceSurfaceFormatsKHR_(physical_, surface_, &count, formats.data());
+        if (result != VK_SUCCESS || !count) return defer_surface_loss(result);
         formats.resize(count);
         // An sRGB source wants an sRGB swapchain (the blit decodes and encodes, which cancel); any other source
         // wants UNORM (the bytes go through as they are). BGRA before RGBA, as the surface lists them.
@@ -1241,11 +1250,11 @@ private:
                     break;
                 }
         }
-        if (vkGetPhysicalDeviceSurfacePresentModesKHR_(physical_, surface_, &count, nullptr) != VK_SUCCESS || !count)
-            return false;
+        result = vkGetPhysicalDeviceSurfacePresentModesKHR_(physical_, surface_, &count, nullptr);
+        if (result != VK_SUCCESS || !count) return defer_surface_loss(result);
         std::vector<VkPresentModeKHR> modes(count);
-        if (vkGetPhysicalDeviceSurfacePresentModesKHR_(physical_, surface_, &count, modes.data()) != VK_SUCCESS || !count)
-            return false;
+        result = vkGetPhysicalDeviceSurfacePresentModesKHR_(physical_, surface_, &count, modes.data());
+        if (result != VK_SUCCESS || !count) return defer_surface_loss(result);
         modes.resize(count);
         VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;  // always available
         if (!vsync) {
@@ -1275,7 +1284,10 @@ private:
         VkSwapchainPresentModesCreateInfoEXT switchable{VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODES_CREATE_INFO_EXT};
         std::array<VkPresentModeKHR, 2> switchable_modes{VK_PRESENT_MODE_FIFO_KHR, VK_PRESENT_MODE_MAX_ENUM_KHR};
         VkPresentModeKHR tear = VK_PRESENT_MODE_MAX_ENUM_KHR;
-        if (vsync && mode == VK_PRESENT_MODE_FIFO_KHR) tear = find_tear_mode(modes, info.minImageCount, info.imageUsage, info.imageExtent);
+        if (vsync && mode == VK_PRESENT_MODE_FIFO_KHR) {
+            result = find_tear_mode(modes, info.minImageCount, info.imageUsage, info.imageExtent, tear);
+            if (result == VK_ERROR_SURFACE_LOST_KHR) return defer_surface_loss(result);
+        }
         if (tear != VK_PRESENT_MODE_MAX_ENUM_KHR) {
             switchable_modes[1] = tear;
             switchable.presentModeCount = 2;
@@ -1293,7 +1305,7 @@ private:
             std::lock_guard lock(context_.submit_mutex());
             release(old);  // retired by the creation attempt, whether or not it succeeded
         }
-        if (created != VK_SUCCESS) return false;
+        if (created != VK_SUCCESS) return defer_surface_loss(created);
 
         std::vector<VkImage> images;
         std::vector<VkSemaphore> ready;
@@ -1340,13 +1352,13 @@ private:
     }
 
 #ifdef LEONIDA_SWAPCHAIN_MAINTENANCE1
-    // The mode a FIFO swapchain can also present in, so that a late frame can be shown at once: IMMEDIATE, else
+    // Select a mode a FIFO swapchain can also present in so a late frame can be shown at once: IMMEDIATE, else
     // FIFO_RELAXED, each only if the surface lists it and reports it compatible with FIFO (VK_KHR_surface_maintenance1).
     // `min_images` is raised to what that mode needs too. The mode must also accept the swapchain's image usage and
-    // extent (its capabilities can differ from FIFO's). MAX_ENUM when there is none or the extension is not in use.
-    VkPresentModeKHR find_tear_mode(const std::vector<VkPresentModeKHR>& modes, std::uint32_t& min_images,
-                                    VkImageUsageFlags usage, VkExtent2D extent) {
-        if (!maintenance1_ || !vkGetPhysicalDeviceSurfaceCapabilities2KHR_) return VK_PRESENT_MODE_MAX_ENUM_KHR;
+    // extent (its capabilities can differ from FIFO's). Keep the caller's default if no mode fits.
+    VkResult find_tear_mode(const std::vector<VkPresentModeKHR>& modes, std::uint32_t& min_images,
+                            VkImageUsageFlags usage, VkExtent2D extent, VkPresentModeKHR& selected) {
+        if (!maintenance1_ || !vkGetPhysicalDeviceSurfaceCapabilities2KHR_) return VK_SUCCESS;
         // The capabilities of the surface for one present mode, and the modes it can switch to from there.
         const auto ask = [&](VkPresentModeKHR asked, VkSurfaceCapabilitiesKHR& caps,
                              std::array<VkPresentModeKHR, 16>* compatible, std::uint32_t* compatible_count) {
@@ -1360,22 +1372,26 @@ private:
                 compat.pPresentModes = compatible->data();
             }
             VkSurfaceCapabilities2KHR out{VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_KHR, compatible ? &compat : nullptr};
-            if (vkGetPhysicalDeviceSurfaceCapabilities2KHR_(physical_, &surface_info, &out) != VK_SUCCESS) return false;
+            const VkResult result = vkGetPhysicalDeviceSurfaceCapabilities2KHR_(physical_, &surface_info, &out);
+            if (result != VK_SUCCESS) return result;
             caps = out.surfaceCapabilities;
             if (compatible_count) *compatible_count = std::min<std::uint32_t>(compat.presentModeCount, 16);
-            return true;
+            return VK_SUCCESS;
         };
         VkSurfaceCapabilitiesKHR fifo_caps{};
         std::array<VkPresentModeKHR, 16> compatible{};
         std::uint32_t compatible_count = 0;
-        if (!ask(VK_PRESENT_MODE_FIFO_KHR, fifo_caps, &compatible, &compatible_count)) return VK_PRESENT_MODE_MAX_ENUM_KHR;
+        VkResult result = ask(VK_PRESENT_MODE_FIFO_KHR, fifo_caps, &compatible, &compatible_count);
+        if (result != VK_SUCCESS) return result;
         for (const VkPresentModeKHR wanted : {VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_FIFO_RELAXED_KHR}) {
             if (std::find(modes.begin(), modes.end(), wanted) == modes.end() ||
                 std::find(compatible.begin(), compatible.begin() + compatible_count, wanted) ==
                     compatible.begin() + compatible_count)
                 continue;
             VkSurfaceCapabilitiesKHR mode_caps{};
-            if (!ask(wanted, mode_caps, nullptr, nullptr)) continue;
+            result = ask(wanted, mode_caps, nullptr, nullptr);
+            if (result == VK_ERROR_SURFACE_LOST_KHR) return result;
+            if (result != VK_SUCCESS) continue;
             if ((mode_caps.supportedUsageFlags & usage) != usage) continue;
             if (extent.width < mode_caps.minImageExtent.width || extent.height < mode_caps.minImageExtent.height ||
                 extent.width > mode_caps.maxImageExtent.width || extent.height > mode_caps.maxImageExtent.height)
@@ -1386,9 +1402,10 @@ private:
                                                 mode_caps.maxImageCount ? mode_caps.maxImageCount : UINT32_MAX);
             if (count > most) continue;
             min_images = count;
-            return wanted;
+            selected = wanted;
+            return VK_SUCCESS;
         }
-        return VK_PRESENT_MODE_MAX_ENUM_KHR;
+        return VK_SUCCESS;
     }
 #endif
 
@@ -1406,6 +1423,7 @@ private:
     VkInstance instance_;
     VkPhysicalDevice physical_;
     VkQueue queue_;
+    std::uint32_t family_;
     mutable std::recursive_mutex present_mutex_;  // all presenter state: submit(), a deferred present, the accessors
     mutable std::mutex abort_mutex_;               // abort_ alone: set_abort() must work while a present waits
     std::deque<PendingPresent> deferred_;  // presents queued behind held work, in call order
