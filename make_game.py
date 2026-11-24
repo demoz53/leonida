@@ -1079,7 +1079,7 @@ def ensure_submodule() -> None:
          "\"git submodule update --init --recursive\" in this folder and build again.")
 
 
-def check(game: str, full: bool) -> dict:
+def check(game: str, full: bool, *, jobs: int | None = None) -> dict:
     if not os.path.isdir(game):
         h = xvd_header(game) if os.path.isfile(game) else None
         fail(container_message(game, h) if h else f"Game folder not found: {game}")
@@ -1095,7 +1095,9 @@ def check(game: str, full: bool) -> dict:
     if bad:
         fail(f"{bad} file(s) missing or different. Use a complete, unmodified copy of version {v['version']}.")
     if full:
-        py("manifest.py", "verify", game, "--manifest", os.path.join(VERSIONS, f"xbox-{v['version']}.json"))
+        job_args = [] if jobs is None else ["--jobs", str(jobs)]
+        py("manifest.py", "verify", game, "--manifest",
+           os.path.join(VERSIONS, f"xbox-{v['version']}.json"), *job_args)
     exe = os.path.join(game, v["expected_exe"])
     log(f"check: all files present{' and hashes match' if full else ''}. "
         + ("Executable found." if os.path.isfile(exe) else
@@ -2919,7 +2921,8 @@ def main() -> int:
     ap.add_argument("--work", type=nonempty_path, help="folder for intermediate files (hundreds of GB; default <out>/work)")
     ap.add_argument("--stages", help="comma list from: " + ",".join(STAGES))
     ap.add_argument("--check", action="store_true", help="only check the game files")
-    ap.add_argument("--full-check", action="store_true", help="also compare SHA-256 of every file (slow)")
+    ap.add_argument("--full-check", action="store_true",
+                    help="also verify each manifest file's SHA-256 using --jobs workers (slow)")
     ap.add_argument("--wav", action="store_true",
                     help="also decode the Ogg Opus audio to 16-bit PCM WAV (much larger; needs ffmpeg)")
     ap.add_argument("--jobs", type=positive_int, default=max(1, (os.cpu_count() or 2) // 2))
@@ -2987,7 +2990,8 @@ def main() -> int:
     work = os.path.abspath(a.work or os.path.join(out, "work"))
     require_folder("--out", out)
     require_folder("--work", work)
-    v = check(game, a.full_check)
+    a.jobs = leonida_tui.clamp_jobs(a.jobs)
+    v = check(game, a.full_check, jobs=a.jobs)
     if a.check:
         return 0
     # Resolve existing parents too: a not-yet-created destination can be under a junction or symlink.
@@ -3069,7 +3073,6 @@ def main() -> int:
             a.pc_tail_ubo = True
     fallbacks = fallback_flags(a) if "shaders" in stages else ()
     overlap = True
-    a.jobs = leonida_tui.clamp_jobs(a.jobs)
     use_tui = leonida_tui.tui_eligible(a.no_tui)
     if use_tui:
         cfg = leonida_tui.run_setup(a.jobs, default_overlap=True)
