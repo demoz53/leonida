@@ -12,7 +12,6 @@ These tests verify:
 """
 import os
 import re
-import shlex
 import shutil
 import struct
 import subprocess
@@ -21,6 +20,7 @@ import unittest
 
 import support
 import rdna2spirv
+import mc_command
 
 PS_EPILOGUE = ["exp mrt0 v0, v1, v2, v3 done vm", "s_endpgm"]
 CS_EPILOGUE = ["s_endpgm"]
@@ -52,7 +52,10 @@ def vdata_reg(dmask, d16=False):
 def llvm_mc_cmd():
     env = os.environ.get("LLVM_MC")
     if env:
-        return shlex.split(env)
+        # shlex.split drops the backslashes of a Windows path, so a Windows LLVM_MC became a name that
+        # does not exist and the subprocess call failed before llvm-mc was ever started. tools/mc_command.py
+        # is the helper every other tool in this repository uses, and it keeps the path whole.
+        return mc_command.mc_command(env)
     exe = shutil.which("llvm-mc")
     return [exe] if exe else None
 
