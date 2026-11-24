@@ -17212,6 +17212,25 @@ MIX_INLINE_F16 = {**{0x80 + n: n for n in range(65)}, **{0xC0 + n: -n & 0xFFFF f
                   0xF6: 0x4400, 0xF7: 0xC400, 0xF8: 0x3118}
 
 
+def sdwa_inline_float(raw, printed, op):
+    """LLVM 19 can print an integer-to-half SDWA conversion's inline float as an extra literal dword."""
+    if op not in ("v_cvt_f16_u16_sdwa", "v_cvt_f16_i16_sdwa") or len(printed) != 12 or len(raw) < 8:
+        return False
+    # Keep only the native VOP1 opcode and source marker when checking the first dword.
+    word = int.from_bytes(raw[:4], "little") & 0xfe01ffff
+    opcode = 0x7e00a0f9 if op == "v_cvt_f16_u16_sdwa" else 0x7e00a2f9
+    return (word == opcode and 0xf0 <= raw[4] <= 0xf8 and raw[6] & 0x80 and printed[4] == 0xff
+            and raw[:4] == printed[:4] and raw[5:8] == printed[5:8]
+            and int.from_bytes(printed[8:], "little") == MIX_INLINE_F16[raw[4]])
+
+
+def restore_sdwa_source(ins, raw):
+    import rdna2_decode
+    source, = rdna2_decode.decode_bytes(raw[:8])["insns"]
+    ins["args"][1] = source["args"][1]
+    ins["enc"] = raw[:8].hex()
+
+
 def mix_inline_literal(raw, printed, op):
     """The 32-bit literal of a v_fma_mix* that llvm-mc 21 printed as an inline constant, else None.
 
@@ -17418,7 +17437,7 @@ def check_printed_encodings(path, info):
     blob = native_blob(path, info["name"])
     if int(m.group(3), 16) > len(blob):
         return
-    shift = 0        # bytes the decoder read past the printed encodings so far (mix_inline_literal)
+    shift = 0        # actual bytes consumed minus printed bytes consumed so far
     for ins in info["insns"]:
         ins["pc"] += shift
         if not ins.get("enc"):
@@ -17426,6 +17445,10 @@ def check_printed_encodings(path, info):
         enc = bytes.fromhex(ins["enc"])
         raw = blob[ins["pc"]:ins["pc"] + len(enc)]
         if not same_encoding(raw, enc, ins["op"], len(ins["args"])):
+            if sdwa_inline_float(raw, enc, ins["op"]):
+                restore_sdwa_source(ins, raw)
+                shift -= 4
+                continue
             literal = mix_literal(raw, enc, base_op(ins["op"]))
             if literal is not None:
                 restore_mix_literal(ins, raw, literal)
@@ -17491,6 +17514,11 @@ def translate(path):
                 literal = mix_literal(blob[at:at + len(enc)], enc, base_op(op))
                 if literal is not None:
                     restore_mix_literal(ins, blob[at:at + len(enc)], literal)
+                    break
+                raw8 = blob[at:at + 8]
+                if sdwa_inline_float(raw8, enc, op):
+                    restore_sdwa_source(ins, raw8)
+                    enc = raw8
                     break
                 literal = mix_inline_literal(blob[at:at + 12], enc, base_op(op))
                 if literal is not None:

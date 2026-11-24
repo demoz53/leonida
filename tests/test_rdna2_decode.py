@@ -393,11 +393,13 @@ class Rdna2DecodeUnitTests(unittest.TestCase):
             if r.returncode != 0 or "error:" in r.stderr:
                 continue
             raw = bytearray()
+            assembled = []
             for ln in r.stdout.splitlines():
                 if "; encoding:" not in ln or ln.lstrip().startswith("."):
                     continue
                 ins = shader_ir.parse_line(ln)
                 if ins and ins["enc"]:
+                    assembled.append(ins)
                     raw.extend(bytes.fromhex(ins["enc"]))
             dcmd = [mc, "-disassemble", "-triple=amdgcn--amdpal", "-mcpu=gfx1013", "-show-encoding"]
             if mattr:
@@ -416,7 +418,12 @@ class Rdna2DecodeUnitTests(unittest.TestCase):
             dec = rdna2_decode.decode_bytes(bytes(raw), wave32=wave32)
             self.assertEqual(dec["invalid"], 0, path)
             self.assertEqual(len(dec["insns"]), len(llvm_insns), path)
-            for li, di in zip(llvm_insns, dec["insns"]):
+            self.assertEqual(len(assembled), len(llvm_insns), path)
+            for ai, li, di in zip(assembled, llvm_insns, dec["insns"]):
+                # LLVM 19 re-encodes this disassembly with a spurious literal. Its assembler
+                # prints the original operand, modifiers and eight bytes for the same instruction.
+                if rdna2spirv.sdwa_inline_float(bytes.fromhex(ai["enc"]), bytes.fromhex(li["enc"]), li["op"]):
+                    li = ai
                 self.assertEqual(di["enc"], li["enc"], path)
                 self.assertEqual(norm_op(di["op"]), norm_op(li["op"]), path)
                 self.assertEqual([norm_arg(x, di["op"]) for x in di["args"]],
