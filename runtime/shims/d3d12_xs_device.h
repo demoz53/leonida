@@ -133,6 +133,10 @@ unsigned device_proxy_slot_count(const void* device);
 // The PC device behind a proxy. Null when `device` is not a proxy.
 ID3D12Device* device_proxy_real_device(const void* device);
 
+// The real object behind any child proxy, or null when `object` is none of them. For code outside this file that is
+// handed a title's object, like the XboxBvhBuilder shim's command lists.
+IUnknown* real_object_behind_proxy(const void* object);
+
 // Device slot 133 (the console's CreatePlacedResourceX) makes a buffer on the title's pages at `va`. The proxy does
 // not create it itself: the device behind it does, through this handler, which the Vulkan layer registers
 // (rt::d3d12::create_buffer_at_host_address). With none registered, or a PC device behind the proxy, the slot
