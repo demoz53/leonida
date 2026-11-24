@@ -252,10 +252,15 @@ int main() {
     check(ctx_all.xmaContextArray != nullptr, "xmaContextArray is allocated");
     check(ctx_all.pcmContextArray != nullptr, "pcmContextArray is allocated");
 
-    // Release shape contexts
-    check(release_ctx(&ctx_all) == S_OK, "AcpHalReleaseShapeContexts succeeds");
-    check(ctx_all.xmaContextArray == nullptr, "xmaContextArray is reset to null");
-    check(release_ctx(nullptr) == S_OK, "AcpHalReleaseShapeContexts(nullptr) succeeds");
+    // Release shape contexts. The GDK call takes no argument, so whatever the first argument register holds is not a
+    // structure to write: a stand-in for a stale RCX (a block of 0xAA) must come back untouched.
+    unsigned char stale_rcx[sizeof(ctx_all)];
+    std::memset(stale_rcx, 0xAA, sizeof(stale_rcx));
+    check(release_ctx(stale_rcx) == S_OK, "AcpHalReleaseShapeContexts succeeds");
+    bool untouched = true;
+    for (unsigned char b : stale_rcx) untouched = untouched && b == 0xAA;
+    check(untouched, "AcpHalReleaseShapeContexts writes nothing through its (absent) argument");
+    check(release_ctx(nullptr) == S_OK, "AcpHalReleaseShapeContexts again succeeds");
 
     std::printf("acphal_test complete: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;

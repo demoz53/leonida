@@ -383,7 +383,11 @@ HRESULT __stdcall AcpHalAllocateShapeContexts(SHAPE_CONTEXTS* ctx) {
 
 // ---- AcpHalReleaseShapeContexts ----
 
-HRESULT __stdcall AcpHalReleaseShapeContexts(SHAPE_CONTEXTS* ctx = nullptr) {
+// The GDK's AcpHalReleaseShapeContexts() takes no argument: it frees what AcpHalAllocateShapeContexts made. It used
+// to take a SHAPE_CONTEXTS* and null its six array pointers; a caller passes nothing, so that pointer was whatever RCX
+// held and six words were written through it (intermittent heap corruption in audio_stub_test, and in the title's
+// memory at its call). The caller's own structure is the caller's to clear.
+HRESULT __stdcall AcpHalReleaseShapeContexts() {
     std::lock_guard lock(g_apu_mutex);
 
     // Free all recorded context allocations
@@ -391,15 +395,6 @@ HRESULT __stdcall AcpHalReleaseShapeContexts(SHAPE_CONTEXTS* ctx = nullptr) {
         if (p) std::free(p);
     }
     g_active_shape_arrays.clear();
-
-    if (ctx) {
-        ctx->srcContextArray = nullptr;
-        ctx->eqCompContextArray = nullptr;
-        ctx->filtVolContextArray = nullptr;
-        ctx->dmaContextArray = nullptr;
-        ctx->xmaContextArray = nullptr;
-        ctx->pcmContextArray = nullptr;
-    }
 
     trace_call("AcpHalReleaseShapeContexts", "");
     return S_OK;
