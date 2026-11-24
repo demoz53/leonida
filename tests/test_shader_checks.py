@@ -150,6 +150,8 @@ class Wave64Checks(unittest.TestCase):
             if name == "cs_cvt_pk_u8":
                 return 0, "out[0..7] = " + " ".join(map(str, check.CVT_PK_U8_WORDS)) + "\n"
             if name == "cs_pk_mul_lo_const":
+                self.assertEqual((args, env["VKC_OUT_WORDS"]), (("1", "dump"), "128"))
+                Path(env["VKC_DUMP"]).write_bytes(struct.pack("<128I", *(check.PK_MUL_LO_WORDS[:4] * 32)))
                 return 0, "out[0..7] = " + " ".join(map(str, check.PK_MUL_LO_WORDS)) + "\n"
             if name == "cs_store":
                 return 0, "out[0..7] = " + " ".join(map(str, (check.CS_STORE + [0] * 8)[:8])) + "\n"

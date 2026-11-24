@@ -777,6 +777,16 @@ def fmt_d16_xyz_test(tools, spirv, env=None):
     return dump_test(tools, spirv, "cs_fmt_d16_xyz", FMT_D16_XYZ_WORDS, len(FMT_D16_XYZ_WORDS), env)
 
 
+def pk_mul_lo_const_test(tools, spirv, env=None):
+    """The fixture writes four words per lane for 32 lanes, beyond the harness's default 64-word heap.
+    Allocate all 128 words and check every lane, not just the first two printed by the harness."""
+    env = dict(os.environ if env is None else env)
+    if sg := subgroup_size(spirv, "cs_pk_mul_lo_const"):
+        env.setdefault("VKC_SUBGROUP_SIZE", str(sg))
+    want = PK_MUL_LO_WORDS[:4] * 32
+    return dump_test(tools, spirv, "cs_pk_mul_lo_const", want, len(want), env)
+
+
 class Skip(str):
     """A result that is neither a pass nor a failure: the device can't run the test."""
 
@@ -1860,8 +1870,7 @@ def main():
     results.append(("cs_fma_fused", fma_fused_test(tools, spirv)))
     results.append(("cs_cvt_pk_u8", compute_test(tools, spirv, "cs_cvt_pk_u8", "1", "dump",
                                                  expected_words=CVT_PK_U8_WORDS)))
-    results.append(("cs_pk_mul_lo_const", compute_test(tools, spirv, "cs_pk_mul_lo_const", "1", "dump",
-                                                       expected_words=PK_MUL_LO_WORDS)))
+    results.append(("cs_pk_mul_lo_const", pk_mul_lo_const_test(tools, spirv)))
     for name, want in W64X_DUMPS:   # without --require-wave64 when LEONIDA_W64_EMULATE=1
         results.append((name, compute_test(tools, spirv, name, "1", "dump", require_wave64=not W64_EMULATED,
                                            expected_words=want)))
