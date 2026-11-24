@@ -14,6 +14,7 @@ post counts and pass/fail lines there, never game shaders, logs or private paths
 | NVIDIA GeForce RTX 3080 Ti (Ampere), subgroup 32..32 | NVIDIA 621.24, Vulkan 1.4.357, Windows 11 26300.9974 | `da60a36` | not run | not run | 196/248 passed, 49 skipped, 3 failed (native); 227/248 passed, 17 skipped, 4 failed (`LEONIDA_W64_EMULATE=1`) | `cs_imgload_tfe`, `cs_imgload_d16_tfe` (the #31 signature); `cs_w32_exec_computed`, `cs_w64_exec_computed` (pass with the translator of `84347bb`) | [local note](../gpu-test-results/RTX3080Ti.txt) |
 | Intel Graphics (Meteor Lake, Xe-LPG), subgroup 8..32 | ANV, Mesa 26.2.7, Vulkan 1.4.354, Fedora 45 | `84347bb` | 279/279 translated and valid | 177/219 pass, 40 skipped, 2 failed | 194/248 passed, 52 skipped (native); 226/248 passed, 20 skipped (`LEONIDA_W64_EMULATE=1`) | `cs_imgload_tfe`, `cs_imgload_d16_tfe`: the fixtures expect the tfe status cleared, the hardware keeps it (see below) | [local note](../gpu-test-results/IntelMTL.txt) |
 | NVIDIA GeForce RTX 3080 (Ampere, GA102, 10 GB GDDR6X), subgroup 32..32 | NVIDIA 580.178.04, Vulkan 1.4.312, Ubuntu 26.04 LTS | `d2cd6c0` | not run | not run | 197/248 passed, 49 skipped, 2 failed (native); 229/248 passed, 17 skipped, 2 failed (`LEONIDA_W64_EMULATE=1`) | `cs_imgload_tfe`, `cs_imgload_d16_tfe` (#31; see #280) | [local note](../gpu-test-results/RTX3080.txt) |
+| AMD Radeon 780M (RDNA3 iGPU, gfx1103), subgroup 32..64 | AMD proprietary 26.10.2 (LLPC), Vulkan 1.4.359, Windows 11 10.0.29712 | `9ec34cdf` | 257/257 translated and valid | not run separately (run_gpu_tests.py below) | 228/248 passed, 16 skipped, 4 failed | `cs_w32_exec_computed`, `cs_w64_exec_computed` (#15), `cs_imgload_tfe`, `cs_imgload_d16_tfe` (#31) | [local note](../gpu-test-results/780M.txt) |
 
 ## AMD Radeon RX 9070 GRE — 2026-11-23
 
@@ -132,3 +133,35 @@ The two failures are not a translator or driver problem. Both fixtures seed the 
 resident read to clear it, but native gfx1036 keeps the seed (the review on #98), and LLVM initializes the TFE/LWE
 result itself before the instruction for the same reason. The translator keeps it too. #98, which cleared it, made
 both fixtures pass and was closed; the fixtures are what needs correcting.
+## AMD Radeon 780M — 2026-11-24
+
+```
+GPU:        AMD Radeon 780M Graphics (RDNA3 iGPU, gfx1103, WDDM 3.2, 16 GB shared), subgroup 32..64
+Driver:     AMD proprietary 26.10.2 (32.0.32015.12012, LLPC), Vulkan 1.4.359
+Subgroup:   32..64 (minSubgroupSize 32, maxSubgroupSize 64)
+OS:         Windows 11, 10.0.29712
+Commit:     9ec34cdff41b19d7671bc260e5f40dc69790d905 (main, 2026-11-24)
+Tools:      llvm-mc 23.1.6 (conda-forge llvm-tools, AMDGPU target), SPIRV-Tools v2026.4,
+            Clang 23.1.6 (llvm-mingw 20261117), CMake 4.5.1 + Ninja 1.13.2, Python 3.13.17,
+            Vulkan headers: the repository's pinned 6802bb4733b63ed5efd3adb308a6c885ef180ea1
+            (vulkan-sdk-1.4.363.0)
+run_gpu_tests.py: 257 shaders: 257 translated, 257 pass spirv-val
+            228/248 passed, 16 skipped, 4 failed
+Failed:     cs_w32_exec_computed, cs_w64_exec_computed (#15),
+            cs_imgload_tfe, cs_imgload_d16_tfe (#31)
+Skipped:    16 skips are the documented "run by d3d12_*_test / w64_graphics.py" cases.
+```
+
+Setup: `cmake -S runtime -B runtime/build -G Ninja -DCMAKE_CXX_COMPILER=<llvm-mingw clang++> -DLEONIDA_BUILD_WINDOWS_RUNTIME=OFF -DLEONIDA_VULKAN_HEADERS_FETCH=ON`;
+the pinned Khronos Vulkan-Headers release (6802bb47, vulkan-sdk-1.4.363.0) is hash-checked by `runtime/CMakeLists.txt`.
+This machine already has Vulkan 1.3 headers in the include search path, so the same pinned release was supplied
+directly instead; the full record says how. This machine also has no MSVC and no Windows SDK, so the D3D12-side
+runtime and its tests are not built and the 16 cases above skip. The full record, with every skip by name, is in
+[`gpu-test-results/780M.txt`](../gpu-test-results/780M.txt).
+
+The tfe pair fails here for the same reason as on the Intel Meteor Lake record (#31): the translator leaves the
+tfe status VGPR at its seed of 1000 instead of writing the fetch status, so every texel comes back 2000 too
+high. The exec_computed pair is #15 and returns the same words as the CPU interpreter.
+
+AI-assisted (MiniMax Code): built `main` at `9ec34cdf`, ran `run_gpu_tests.py` on this GPU, and reran the
+suite on its own to confirm the four failures.

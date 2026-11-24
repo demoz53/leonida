@@ -16,19 +16,35 @@ Failed:     cs_w32_exec_computed: got 8192 8192 8192 7682 512 4100 0 3
             same two words (see #15), so this is not a GPU-only effect.
             cs_imgload_tfe: exit 1. vk_store_test reports
             "r32 sint (sint view): 64 bad, texel(5,3) = 2071", where the expected value
-            is 100 - (8y + x) = 71: every texel is off by exactly 2000, the value the
-            fixture seeds the tfe status VGPR with, so the fetch status VGPR is read but
-            never written.
+            is 100 - (8y + x) = 71. The fixture (runtime/test/shaders/cs_imgload_tfe.asm)
+            seeds each of the two tfe status VGPRs with 1000 (0x3e8) before its load and
+            adds both of them into the result, so a status that keeps its seed moves every
+            texel by 1000 or 2000. The fetch never writes the status VGPR, so both keep
+            the seed: 129 (the uint image, 100 + 8y + x) - 58 (the sint image, -2 (8y + x))
+            + 2000 = 2071, where 129 - 58 = 71 is the expected value.
             cs_imgload_d16_tfe: the same, 64 bad, texel(5,3) = 2071.
 Skipped:    16 skips are the documented "run by d3d12_*_test / w64_graphics.py" cases:
             cs_buf_counter, cs_buf_typed, cs_m4_fill, cs_m4_indirect, ps_live_width,
             ps_m15, ps_m2, ps_m2_array, ps_m2_literal, ps_m2_uoff, ps_m3, ps_m3_post,
             ps_m3_query, vs_m15, vs_m2, vs_m3.
 Notes:
-- Built with cmake -S runtime -B runtime/build/vulkan4 -G Ninja
-  -DCMAKE_CXX_COMPILER=<llvm-mingw clang++> -DLEONIDA_BUILD_WINDOWS_RUNTIME=OFF.
+- Built with cmake -S runtime -B runtime/build -G Ninja
+  -DCMAKE_CXX_COMPILER=<llvm-mingw clang++> -DLEONIDA_BUILD_WINDOWS_RUNTIME=OFF
+  -DLEONIDA_VULKAN_HEADERS_FETCH=ON.
+  That flag downloads the pinned Khronos Vulkan-Headers release
+  (6802bb4733b63ed5efd3adb308a6c885ef180ea1, vulkan-sdk-1.4.363.0) and CMake checks it
+  against the URL_HASH in runtime/CMakeLists.txt. The fetch is only taken when no Vulkan
+  headers are found, and this machine has conda-forge's Vulkan 1.3 headers in the include
+  search path, so the same pinned release was handed to CMake directly instead
+  (FETCHCONTENT_SOURCE_DIR_VULKANHEADERS, with the 1.3 headers kept out of the search
+  path; tarball SHA256 9044fbb356160e43201dc2094acb44c8a906722a63a35f48fc0f051579db9bb6,
+  the URL_HASH in runtime/CMakeLists.txt).
   This machine has no MSVC and no Windows SDK, so the D3D12-side runtime and its tests
   are not built; that is why the 16 cases above skip instead of running.
+- The pinned headers matter for the result: rebuilt against conda-forge's Vulkan 1.3
+  headers instead, the same suite skips three more cases (ps_texoff, ps_texoff_forms,
+  ps_texoff_implicit) and reports 225/248 passed, 19 skipped, with the same four
+  failures.
 - Every other case was exact: the pixel cases 4096/4096 and the compute values exact.
 - The same suite on the previous main (dde82f27, upstream before the repository went
   private) gives the identical result on every one of the 240 cases the two share, so
