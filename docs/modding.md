@@ -134,8 +134,21 @@ The swap needs one function in the executable: the archetype lookup by name hash
 `0xD7C0CDFF`, takes the functions called right after, and orders them by how many direct callers the
 whole image has. Run it alone with `python -I tools/find_hash_lookup.py <exe>`. What it automates:
 
-1. **Constant search.** The player model id `0xE472B687` should appear as an immediate in the code that
-   sets up the story player. Its callers pass it to the lookup (or to a function that does).
+1. **Constant search, and what it gives on this build.** Read `0xE472B687` as an immediate in the
+   code that sets up the story player, and take its callers: that is the intended route to the
+   lookup. On `game_scarlett_master.exe` it gives nothing. Neither `0xE472B687` nor `0xD7C0CDFF` is
+   in the executable at all — all 120,181,760 bytes were read and searched as 4-byte little-endian,
+   4-byte big-endian, decimal text and hex text, and the image has no delay-load directory (data
+   directory 13 is zero), so they cannot arrive that way either; `tools/find_hash_lookup.py` says so
+   itself (`0 occurrence(s) in code`, "no direct call follows any of the hashes"). The ids are real
+   and the game's tables do carry them — 24 occurrences across the package's root archives
+   (`data.rpf` 1, `packs.rpf` 3, `anim.rpf` 4, `navmeshes.rpf` 10, `movies.rpf` 6; little-endian
+   except a few big-endian ones in `anim.rpf`, `navmeshes.rpf` and `movies.rpf`). The constants are
+   the right keys and they are simply not in the code, so on this build step 2 is what has to find
+   the function. Measured on the 1.0.2.1 image whose size and SHA-256 `docs/embedded_shaders.md`
+   records (`e95020b2fa4a721db3df59fdecf75621730ac559d8835252f6c3b658d5a08993`, computed here and
+   equal), the archive counts on 2026-11-23 and the executable search re-run on 2026-11-24 with the
+   same result.
 2. **Shape.** The lookup takes a 32-bit hash (and an optional out-index), hashes into a bucket table
    and walks a chain comparing a 32-bit key; it is called from hundreds of sites.
 3. **Cross-check.** Called with `0xD7C0CDFF` it must return a valid archetype too (`cs_mandy` is a live
