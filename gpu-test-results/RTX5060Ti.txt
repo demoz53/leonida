@@ -1,0 +1,48 @@
+GPU:        NVIDIA GeForce RTX 5060 Ti (GB206, Blackwell, 16 GB GDDR7),
+            subgroups 32..32
+Driver:     NVIDIA proprietary 620.73.04, Vulkan 1.4.357
+Subgroup:   32..32 (minSubgroupSize 32, maxSubgroupSize 32)
+OS:         CachyOS (Arch Linux), kernel 7.3.1-1-cachyos
+Commit:     8f481cf16 (main, 2026-11-24)
+Tools:      llvm-mc 23.1.4 (Arch llvm, AMDGPU target), SPIRV-Tools v2026.4
+            (Arch spirv-tools v2026.4.rc2-0-gef96ed763), CMake 4.5.1 +
+            Unix Makefiles, Python 3.14.9, Vulkan headers from Arch
+            vulkan-headers
+run_gpu_tests.py: 257 shaders: 257 translated, 257 pass spirv-val
+            native: 197/248 passed, 49 skipped, 2 failed
+            LEONIDA_W64_EMULATE=1: 229/248 passed, 17 skipped, 2 failed
+ctest (Vulkan subset, RelWithDebInfo): 72 configured: 70 passed, 2 skipped
+            (shader_library_corpus, vk_sync_validation), 0 failed
+Failed:     cs_imgload_tfe, cs_imgload_d16_tfe (native and emulated):
+            "r32 sint (sint view): 64 bad, texel(5,3) = 2071" — the signature
+            of #31 (Radeon 780M), also reported on the RTX 3080 Ti (#280),
+            the RTX 3080 (#415) and in the Intel MTL entry. Not a new
+            failure; the translator half is being re-landed as SHADER-1266
+            (claimed in the coordination issue; #98 closed unmerged).
+Skipped:    native: 31 skips "no 64-wide compute subgroup on this device",
+            1 skip "no 64-wide subgroup on this device", 1 skip "this device
+            cannot require a 64-wide fragment subgroup: subgroup 32..32"
+            (32-wide subgroups; the wave64 suite needs a 64-wide device or
+            the emulate path), plus the 16 documented "run by d3d12_*_test /
+            w64_graphics.py" cases (cs_buf_counter, cs_buf_typed, cs_m4_fill,
+            cs_m4_indirect, ps_live_width, ps_m15, ps_m2, ps_m2_array,
+            ps_m2_literal, ps_m2_uoff, ps_m3, ps_m3_post, ps_m3_query,
+            vs_m15, vs_m2, vs_m3).
+            emulated: ps_w64x_readlane plus the same 16.
+Notes:
+- CORRECTION to the record as first filed: the original run at ece4ba5b3
+  was reported as "0 failed", but 197 passed + 49 skipped leaves 2 of 248
+  unaccounted for — both tfe fixtures were failing then too (verified by
+  rerunning them at ece4ba5b3 on this same GPU and driver: the same
+  "64 bad, texel(5,3) = 2071" line). Identical result at 8f481cf16: no
+  change across the 24 commits in between.
+- First Blackwell result file in gpu-test-results/ (existing at first
+  filing: 780M, IntelMTL, Raphael-610M, RTX4070Ti, RX9070GRE, RX9070XT).
+- Every skip is a documented device-capability or cross-suite case; no
+  judgement was withheld on a 32-wide-capable test.
+- Built the portable (Vulkan) subset only: cmake -S runtime -B
+  runtime/build -DCMAKE_BUILD_TYPE=RelWithDebInfo; cmake --build
+  runtime/build --parallel 8 (gta6rt requires Windows; on Linux the
+  Vulkan tools are what get built).
+- Machine is a headless-ish Steam PC (Hyprland session); tests ran with
+  the proprietary NVIDIA driver and the stock Vulkan loader, no gamescope.
