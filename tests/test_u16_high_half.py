@@ -98,6 +98,44 @@ def test_i16_uses_ashr16_not_shr16_sextract(name, asm, tmp_path):
     _validate_spv(tmp_path, spvasm)
 
 
+PK_SHIFTS = ["v_pk_lshlrev_b16", "v_pk_lshrrev_b16", "v_pk_ashrrev_i16"]
+
+
+@pytest.mark.parametrize("op", PK_SHIFTS, ids=PK_SHIFTS)
+def test_pk_shifts_read_the_half_they_shift_like_every_other_reader(op, tmp_path):
+    """VOP3P packed shifts read the half they shift through ``Gen.u16_half`` / ``Gen.i16_half``.
+
+    Before, the half of ``src1`` went through ``OpBitField{S,U}Extract(x, 16, 16)``, the form this file exists to
+    keep out of the translator (#1506: an AMD Windows LLPC driver reads a constant-offset-16 field extract with the
+    offset taken mod 16). The values are identical either way - ``tests/test_pk16_diff.py`` and the ``ps_ops4`` /
+    ``ps_ops6`` fixtures pass before and after - so this test is what makes the lowering itself observable, and it
+    also pins that the signed op weights its half as ``%int``, as every other i16 reader here does.
+    """
+    signed = op.endswith("i16")
+    for sel, selhi in (("0,0", "0,0"), ("1,0", "1,0"), ("0,1", "0,1"), ("1,1", "1,1")):
+        asm = f"{op} v3, v1, v2 op_sel:[{sel}] op_sel_hi:[{selhi}]\n"
+        spvasm = translate_listing(tmp_path, PROLOGUE + asm)
+        bad = re.findall(r"OpBitField[US]Extract %\w+ %\w+ %c10 %c\w+\b", spvasm)
+        assert bad == [], f"{op} op_sel:[{sel}] op_sel_hi:[{selhi}] reads a half with {bad}"
+        high = sel.split(",")[1] == "1" or selhi.split(",")[1] == "1"
+        if high:  # Gen.u16_half / Gen.i16_half read a high half with a lone shift.
+            want = r"OpShiftRightArithmetic %int %\w+ %c10\b" if signed else r"OpShiftRightLogical %uint %\w+ %c10\b"
+        else:  # ... and narrow a low half in place.
+            want = r"OpBitFieldSExtract %int %\w+ %c0 %c10\b" if signed else r"OpBitwiseAnd %uint %\w+ %cffff\b"
+        assert re.search(want, spvasm), f"{asm} emits no {want}: {spvasm}"
+        assert _shr16_then_extract16(spvasm) == [], f"{op} narrowed its own >> 16"
+        _validate_spv(tmp_path, spvasm)
+
+
+def test_pk_ashrrev_i16_shifts_the_value_as_signed(tmp_path):
+    """The signed packed shift keeps its ``%int`` value through the shift, so sign extension comes from the type."""
+    asm = "v_pk_ashrrev_i16 v3, v1, v2 op_sel:[0,1] op_sel_hi:[0,1]\n"
+    spvasm = translate_listing(tmp_path, PROLOGUE + asm)
+    shifts = re.findall(r"%\w+ = OpShiftRightArithmetic %(\w+) %\w+ %\w+\b", spvasm)
+    assert shifts and all(t == "int" for t in shifts), f"typed shifts: {shifts}\n{spvasm}"
+    _validate_spv(tmp_path, spvasm)
+
+
 def test_d16_buffer_store_no_redundant_extract_after_shr16(tmp_path):
     asm = (
         "v_mov_b32 v1, 0x9c004000\n"
