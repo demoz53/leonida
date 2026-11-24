@@ -11,6 +11,7 @@ post counts and pass/fail lines there, never game shaders, logs or private paths
 | AMD Radeon RX 7900 GRE (RDNA3, gfx1100), subgroup 32..64 | AMD proprietary 26.11.2 (LLPC), Vulkan 1.4.359, Windows 11 x64 | `5d74c27` | 247/247 translated and valid | run via run_gpu_tests.py | 225/241 passed, 16 skipped | none | [#166](https://github.com/ItsNotRexed/Leonida/issues/166#issuecomment-7115041436) |
 | Intel Graphics (Meteor Lake, Xe-LPG), subgroup 8..32 | ANV, Mesa 26.2.7, Vulkan 1.4.354, Fedora 45 | `84347bb` | 279/279 translated and valid | 177/219 pass, 40 skipped, 2 failed | 194/248 passed, 52 skipped (native); 226/248 passed, 20 skipped (`LEONIDA_W64_EMULATE=1`) | `cs_imgload_tfe`, `cs_imgload_d16_tfe` (#31; pass with #98) | [local note](../gpu-test-results/IntelMTL.txt) |
 | NVIDIA GeForce RTX 3080 Ti (Ampere), subgroup 32..32 | NVIDIA 621.24, Vulkan 1.4.357, Windows 11 26300.9974 | `da60a36` | not run | not run | 196/248 passed, 49 skipped, 3 failed (native); 227/248 passed, 17 skipped, 4 failed (`LEONIDA_W64_EMULATE=1`) | `cs_imgload_tfe`, `cs_imgload_d16_tfe` (the #31 signature); `cs_w32_exec_computed`, `cs_w64_exec_computed` (pass with the translator of `84347bb`) | [local note](../gpu-test-results/RTX3080Ti.txt) |
+| Intel Graphics (Meteor Lake, Xe-LPG), subgroup 8..32 | ANV, Mesa 26.2.7, Vulkan 1.4.354, Fedora 45 | `84347bb` | 279/279 translated and valid | 177/219 pass, 40 skipped, 2 failed | 194/248 passed, 52 skipped (native); 226/248 passed, 20 skipped (`LEONIDA_W64_EMULATE=1`) | `cs_imgload_tfe`, `cs_imgload_d16_tfe`: the fixtures expect the tfe status cleared, the hardware keeps it (see below) | [local note](../gpu-test-results/IntelMTL.txt) |
 
 ## AMD Radeon RX 9070 GRE — 2026-11-23
 
@@ -111,7 +112,7 @@ build.py:   279 shaders: 279 translated, 279 pass spirv-val
 check.py:   177 of 219 pass, 40 skipped, 2 failed
 run_gpu_tests.py: native 194/248 passed, 52 skipped, 2 failed
             LEONIDA_W64_EMULATE=1: 226/248 passed, 20 skipped, 2 failed
-Failed:     cs_imgload_tfe, cs_imgload_d16_tfe (#31); both pass with #98 on the same main
+Failed:     cs_imgload_tfe, cs_imgload_d16_tfe (#31): the fixtures' expectation, see below
 ```
 
 The device has no 64-wide subgroup. Natively, the 32 tests that need one skip; under `LEONIDA_W64_EMULATE=1` all 32
@@ -124,3 +125,8 @@ distribution's build. The full record, with every skip by name, is in
 
 AI-assisted (Claude Code): built `main` at `84347bb`, ran `build.py`, `check.py` and `run_gpu_tests.py` native and
 emulated on this GPU, and reran the tfe pair with #98 applied.
+
+The two failures are not a translator or driver problem. Both fixtures seed the tfe status VGPR and expect a
+resident read to clear it, but native gfx1036 keeps the seed (the review on #98), and LLVM initializes the TFE/LWE
+result itself before the instruction for the same reason. The translator keeps it too. #98, which cleared it, made
+both fixtures pass and was closed; the fixtures are what needs correcting.
