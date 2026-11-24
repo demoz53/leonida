@@ -1939,19 +1939,6 @@ def drop_index(index: str) -> str:
     return ""
 
 
-def translator_digest() -> str:
-    """SHA-256 over every file directly in tools/: rdna2spirv.py, the modules it imports and the data it reads
-    (gfx10_formats.json). Any change there counts, so parts made by other code are never merged with new ones."""
-    import hashlib
-    h = hashlib.sha256()
-    for name in sorted(os.listdir(TOOLS)):
-        path = os.path.join(TOOLS, name)
-        if os.path.isfile(path):
-            with open(path, "rb") as f:
-                h.update(name.encode("utf-8") + b"\0" + f.read() + b"\0")
-    return h.hexdigest()
-
-
 def _stop_procs(procs: list) -> None:
     """Terminate and reap any child processes still running after an interrupted or failed launch."""
     for p in procs:
@@ -1982,12 +1969,12 @@ def translate(disasm: str, spirv: str, jobs: int, emulate: bool = False,
 
     A shard publishes shard<i>.json and then index.part<i>.json. Both are needed to reuse it. A run stopped
     part-way, or during the merge, keeps those parts when it resumes with the same --jobs, wave64 mode, fallback
-    flags and translator source, and starts only the shards that have none. shaders() drops the plan whenever an
-    earlier step reruns."""
+    flags and translator inputs, and starts only the shards that have none. The plan fingerprints the same translator
+    inputs as the merged index. shaders() drops the plan whenever an earlier step reruns."""
     os.makedirs(spirv, exist_ok=True)
     plan_path = os.path.join(spirv, SHARD_PLAN)
     plan = {"jobs": jobs, "wave64_emulate": bool(emulate), "fallbacks": list(fallbacks),
-            "translator": translator_digest()}
+            "translator": translation_sources_digest()}
     try:
         with open(plan_path, encoding="utf-8") as f:
             same = json.load(f) == plan

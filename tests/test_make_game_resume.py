@@ -3,6 +3,7 @@
 Standard library only; no GPU, no Vulkan SDK, no game data: the shard processes and the merge are mocked. A fake
 shard writes its marker and then index.part<i>.json the way rdna2spirv.py --shard does.
 """
+import hashlib
 import json
 import os
 import sys
@@ -47,14 +48,14 @@ class ResumeShardsTest(unittest.TestCase):
             def finish(self):
                 if self.i in crash:
                     return 1
-                with open(os.path.join(spirv, f"shard{self.i}.json"), "w", encoding="utf-8") as f:
+                with open(os.path.join(spirv, f"shard{self.i}.json"), "w", encoding="utf-8", newline="\n") as f:
                     json.dump({"index": self.i, "count": self.n}, f)
-                with open(os.path.join(spirv, f"index.part{self.i}.json"), "w", encoding="utf-8") as f:
+                with open(os.path.join(spirv, f"index.part{self.i}.json"), "w", encoding="utf-8", newline="\n") as f:
                     json.dump({"tag": tag, "n": self.n}, f)
                 return 0
         with mock.patch.object(make_game.subprocess, "Popen", side_effect=FakeProc), \
                 mock.patch.object(make_game, "py") as py, \
-                mock.patch.object(make_game, "translator_digest", return_value=digest), \
+                mock.patch.object(make_game, "translation_sources_digest", return_value=digest), \
                 mock.patch.object(make_game, "log", lambda *a: None):
             make_game.translate("disasm", self.spirv, jobs, emulate=emulate)
         self.assertEqual(py.call_count, 1)
@@ -115,13 +116,13 @@ class ResumeShardsTest(unittest.TestCase):
     def test_parts_without_a_plan_are_not_trusted(self):
         # A folder from before the plan existed: its parts can come from any --jobs.
         for i in range(2):
-            with open(self.part(i), "w", encoding="utf-8") as f:
+            with open(self.part(i), "w", encoding="utf-8", newline="\n") as f:
                 json.dump({"tag": "old"}, f)
         self.assertEqual(self.translate(2, tag="b"), [0, 1])
 
     def test_an_unreadable_plan_is_not_trusted(self):
         self.translate(2, tag="a")
-        with open(os.path.join(self.spirv, make_game.SHARD_PLAN), "w", encoding="utf-8") as f:
+        with open(os.path.join(self.spirv, make_game.SHARD_PLAN), "w", encoding="utf-8", newline="\n") as f:
             f.write("{")
         self.assertEqual(self.translate(2, tag="b"), [0, 1])
 
@@ -137,10 +138,10 @@ class EarlierStepDropsThePlanTest(unittest.TestCase):
             os.makedirs(spirv)
             for name, entries in (("index.json", [{"file": "shader.dxbc"}]),
                                   ("fssm_index.json", [{"name": "shader"}])):
-                with open(os.path.join(dxbc, name), "w", encoding="utf-8") as f:
+                with open(os.path.join(dxbc, name), "w", encoding="utf-8", newline="\n") as f:
                     json.dump(entries, f)
             plan = os.path.join(spirv, make_game.SHARD_PLAN)
-            with open(plan, "w", encoding="utf-8") as f:
+            with open(plan, "w", encoding="utf-8", newline="\n") as f:
                 json.dump({"jobs": 2, "wave64_emulate": False, "translator": "d1"}, f)
             seen = {}
 
@@ -161,21 +162,76 @@ class EarlierStepDropsThePlanTest(unittest.TestCase):
 
 
 class TranslatorDigestTest(unittest.TestCase):
-    def test_any_file_in_tools_changes_it_and_folders_do_not(self):
-        with tempfile.TemporaryDirectory() as tools:
-            for name, text in (("rdna2spirv.py", "a"), ("gfx10_formats.json", "{}")):
-                with open(os.path.join(tools, name), "w", encoding="utf-8") as f:
-                    f.write(text)
-            with mock.patch.object(make_game, "TOOLS", tools):
-                first = make_game.translator_digest()
-                os.makedirs(os.path.join(tools, "__pycache__"))
-                self.assertEqual(make_game.translator_digest(), first)
-                with open(os.path.join(tools, "gfx10_formats.json"), "w", encoding="utf-8") as f:
-                    f.write("{ }")
-                self.assertNotEqual(make_game.translator_digest(), first)
+    def setUp(self):
+        tmp = self.enterContext(tempfile.TemporaryDirectory())
+        self.spirv = os.path.join(tmp, "spirv")
+        self.tools = os.path.join(tmp, "tools")
+        os.makedirs(self.tools)
+        for name in make_game.TRANSLATION_SOURCES:
+            self.write_tool(name, "{}\n" if name == "gfx10_formats.json" else "# synthetic source\n")
+
+    def write_tool(self, name, content):
+        with open(os.path.join(self.tools, name), "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+
+    def translate(self):
+        started = []
+
+        def start_shard(args):
+            shard, jobs = map(int, args[args.index("--shard") + 1].split("/"))
+            started.append(shard)
+            for name in (f"shard{shard}.json", f"index.part{shard}.json"):
+                # A shard should only start after both of its stale files have been removed.
+                with open(os.path.join(self.spirv, name), "x", encoding="utf-8", newline="\n") as f:
+                    json.dump({"index": shard, "count": jobs}, f)
+            proc = mock.Mock()
+            proc.poll.return_value = 0
+            return proc
+
+        with (mock.patch.object(make_game, "TOOLS", self.tools),
+              mock.patch.object(make_game.subprocess, "Popen", side_effect=start_shard),
+              mock.patch.object(make_game, "py") as merge,
+              mock.patch.object(make_game, "log")):
+            make_game.translate("disasm", self.spirv, 2)
+        # Leave the index unwritten, as if interrupted before the merge finished.
+        merge.assert_called_once_with("rdna2spirv.py", "disasm", "--out", self.spirv, "--merge")
+        return started
+
+    def test_unrelated_tool_addition_and_edit_preserve_finished_shards(self):
+        self.assertEqual(self.translate(), [0, 1])
+        for name in ("shard1.json", "index.part1.json"):
+            os.remove(os.path.join(self.spirv, name))
+        self.write_tool("unrelated.py", "# added\n")
+        self.assertEqual(self.translate(), [1])
+        self.write_tool("unrelated.py", "# edited\n")
+        self.assertEqual(self.translate(), [])
+
+    def test_translator_source_and_format_table_edits_rebuild_finished_shards(self):
+        self.assertEqual(self.translate(), [0, 1])
+        for name, content in (("rdna2spirv.py", "# edited translator\n"), ("gfx10_formats.json", "{ }\n")):
+            with self.subTest(name=name):
+                self.write_tool(name, content)
+                self.assertEqual(self.translate(), [0, 1])
+
+    def test_old_shard_plan_rebuilds_once(self):
+        self.assertEqual(self.translate(), [0, 1])
+        # The old plan hashed every top-level tools file with NUL separators.
+        legacy = hashlib.sha256()
+        for name in sorted(os.listdir(self.tools)):
+            with open(os.path.join(self.tools, name), "rb") as f:
+                legacy.update(name.encode("utf-8") + b"\0" + f.read() + b"\0")
+        plan = os.path.join(self.spirv, make_game.SHARD_PLAN)
+        with open(plan, encoding="utf-8") as f:
+            saved = json.load(f)
+        with open(plan, "w", encoding="utf-8", newline="\n") as f:
+            json.dump({**saved, "translator": legacy.hexdigest()}, f)
+        self.assertEqual(self.translate(), [0, 1])
+        with open(plan, encoding="utf-8") as f:
+            self.assertEqual(json.load(f), saved)
+        self.assertEqual(self.translate(), [])
 
     def test_the_real_tools_folder_gives_a_sha256(self):
-        digest = make_game.translator_digest()
+        digest = make_game.translation_sources_digest()
         self.assertEqual(len(digest), 64)
         int(digest, 16)
 
