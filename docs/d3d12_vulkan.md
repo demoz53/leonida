@@ -2130,6 +2130,10 @@ The trace will enumerate them.
   - `E_NOTIMPL` with a log, for what is not built yet: an AS, a depth-bounds test, separate front and back stencil
     masks, view instancing.
   - `RASTERIZER1`/`2`'s float depth bias is truncated to the integer the PSO path takes, with a log.
+  - A stream the PC numbering refuses, or reads as an AS with no MS, is read again with the console's numbering (no
+    gap at 23, so its 24 is the mesh shader) and that reading is taken when it holds an MS and no AS; evidence in
+    [retail_boot_intel_host.md](retail_boot_intel_host.md) section 3. `LEONIDA_XS_STREAM_ENUM=pc` keeps the PC
+    reading alone, so such streams are refused as before.
 - **Mesh PSO:** the MS (`ms` index entry by FSSM hash) and PS on the mesh stage. It has no vertex input or input
   assembly; the input layout, topology type and strip cut are ignored, as D3D12 ignores them for mesh PSOs. Topology
   and strides are not dynamic state there (VUID-VkGraphicsPipelineCreateInfo-pDynamicStates-07065/07066). Creation
