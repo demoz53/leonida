@@ -152,7 +152,7 @@ def classify(head, size, tail=None):
         if printable >= len(probe) * 0.9 and b"<" in probe and b">" in probe:
             row.update(kind="xml", signature="xml", fragment=True)
             return row
-    if size == 208 and all(struct.unpack_from("<Q", head, off)[0] == val for off, val in INSTANCE_WORDS):
+    if size == 208 and len(head) >= 208 and all(struct.unpack_from("<Q", head, off)[0] == val for off, val in INSTANCE_WORDS):
         h = struct.unpack_from("<Q", head, 0x40)[0]
         w = struct.unpack_from("<I", head, 0xA4)[0]
         row.update(kind="instance208", signature="inst208:0x50000080", hash="%016x" % h,
