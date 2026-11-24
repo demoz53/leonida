@@ -84,15 +84,21 @@ class NativeFolder(unittest.TestCase):
         with patch.object(run_gpu_tests.os, "name", "posix"):
             self.assertEqual(run_gpu_tests.native_folder("/tmp/work-" + MARK), "/tmp/work-" + MARK)
 
+    def test_a_utf8_code_page_keeps_non_ascii_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = os.path.join(tmp, "leonida_gpu_work_" + MARK)
+            os.makedirs(work)
+            self.assertEqual(run_gpu_tests.native_folder(work, ansi="utf-8"), work)
+
     @unittest.skipUnless(os.name == "nt", "8.3 short names are a Windows thing")
     def test_a_folder_outside_the_code_page_gets_its_short_name_or_none(self):
         with tempfile.TemporaryDirectory() as tmp:
             work = os.path.join(tmp, "leonida_gpu_work_" + MARK)
             os.makedirs(work)
-            native = run_gpu_tests.native_folder(work)
+            native = run_gpu_tests.native_folder(work, ansi="cp1252")
             if native is None:
                 self.skipTest("this volume keeps no 8.3 short names (the error path is tested below)")
-            native.encode("mbcs")  # raises if the short name still has a character the code page lacks
+            native.encode("cp1252")  # raises if the short name still has a character the code page lacks
             self.assertNotIn(MARK, native)
             self.assertTrue(os.path.samefile(native, work))
 
