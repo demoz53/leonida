@@ -254,7 +254,6 @@ void check_measured_classes(QueryFn query, XSystemAnalyticsInfo (*named_analytic
 
     // Classes nobody serves are still refused, and logged, as before.
     const GUID refused[] = {
-        {0xa4f1aee2, 0x4bf1, 0x4485, {0xb0, 0x08, 0xa7, 0xc2, 0x6d, 0x52, 0xac, 0x27}},  // XAppCaptureImpl
         {0x12345678, 0x9abc, 0xdef0, {0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0}},  // no such class
     };
     bool all_refused = true;
@@ -262,7 +261,7 @@ void check_measured_classes(QueryFn query, XSystemAnalyticsInfo (*named_analytic
         void* out = reinterpret_cast<void*>(1);
         all_refused = all_refused && query(&cls, cls, &out) == static_cast<HRESULT>(0x80070032) && out == nullptr;
     }
-    check(all_refused, "XAppCaptureImpl and an unknown class are still refused");
+    check(all_refused, "an unknown class is still refused");
 }
 
 // xgameruntime.lib's thunks don't import the runtime: they LoadLibraryW(L"xgameruntime.dll") and GetProcAddress five

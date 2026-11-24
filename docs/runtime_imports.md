@@ -64,6 +64,14 @@ Since the library-loader shims (`runtime/shims/library_loader.cpp`), a module's 
 
 The process shim (`runtime/shims/process.cpp`) serves `ExitProcess` and `GetCommandLineA/W` the same way: through `kernel32`, `kernelbase`, and `api-ms-win-core-processthreads-l1-1-0` and `api-ms-win-core-processenvironment-l1-1-0`, the sets the API-set umbrella libraries (`OneCore_apiset.lib`, `mincore.lib`) bind them to. `vcomp140.dll` imports `ExitProcess` from the first of these. The UCRT's `_get_narrow_winmain_command_line` and `_get_wide_winmain_command_line` are served too, so a `WinMain` executable gets the game's command line as `lpCmdLine`. `abort()` raises `SIGABRT` when the guest installed a handler (the guest's `signal()` import binds to the host CRT, so its table is the one raised here); with the default or ignore disposition, or a handler that returns, the run still ends with code 3. `run_tiny_game_abort_exit_codes` compares that with a native run of the stand-in image. The table above is `gta6rt --dry-run` on each DLL at the commit that added this paragraph.
 
+The lifecycle shim (`runtime/shims/lifecycle.cpp`) serves `RegisterAppStateChangeNotification` and
+`UnregisterAppStateChangeNotification` under `api-ms-win-core-psm-appnotify-l1-1-0`, `-l1-1-1` and `kernelbase.dll`, and
+`CreateWindowExW`/`CreateWindowExA` under `user32.dll` and the two `ext-ms-win-rtcore-ntuser-window-l1-1-*` sets. Only the
+title's first top-level window (no parent, not a child, not a tool window) is fitted to the work area and hooked: its
+`SC_CLOSE` runs the registered suspend callbacks with `quiesced` TRUE under the registration lock, then the run ends
+through the title's own `ExitProcess`, so the host finishes its cleanup. A 1 s deadline ends the run the same way if the
+callbacks have not returned.
+
 The shims added since account for the rest of the difference from the first version of the table. The UCRT's `_configure_narrow_argv`, `_configure_wide_argv`, `__p___argc`, `__p___wargv` and `abort` are served by `runtime/shims/process.cpp`, which is why almost every DLL gained one or two. The file-system calls listed in *Console paths and the write overlay* below (`CreateFile2`, `CopyFile2`, `CreateDirectoryW`, `FindFirstFileExW`, `SetFileAttributesW` and the rest) account for `msvcp140.dll`, `vcomp140.dll`, `Bink2Scarlett.dll`'s `CreateFile2` and part of the two HTTP clients. `winhttp.dll` is a module the shims own (*WinHTTP offline* below), so every `WinHttp*` import binds to it: 15 in `libHttpClient.GDK.dll` (all 16 but `WinHttpCrackUrl`) and 15 in `XCurl.dll` (all but `WinHttpQueryOption`). That is why the two HTTP clients moved the most: 11 to 26 and 9 to 24 shim imports.
 
 The UCRT argv configuration imports honor the executable's startup mode. Each run starts with `argc == 0` and
@@ -461,13 +469,18 @@ on the executable, the rest is not:
 
 - **Accessibility and speech** (`IXAccessibilityImpl2`, slots 3-21): `XHighContrastGetMode` (5) answers Off and
   `XClosedCaptionSetEnabled` (4) is accepted. No voice is installed: `XSpeechSynthesizerEnumerateInstalledVoices`
-  (8) calls back zero times and returns `S_OK`, `XSpeechSynthesizerCreate` (9) fails (`E_FAIL`) with a null handle,
-  and the handle calls (10-16, 21: close, default and custom voice, streams from text and SSML, stream size and
-  data) refuse the handle they were never given (`E_INVALIDARG`, outputs zeroed). The closed-caption properties (3)
-  and the speech-to-text display calls (6, 7, 17-20) fail with `E_FAIL`, writing nothing: their parameter lists
-  are not in the docs' layout.
-- **`XLauncherImpl`** (`IXLauncherImpl`, slots 3-5): `XLaunchUri`, `XDisplayAcquireTimeoutDeferral` (null handle)
-  and `XDisplayCloseTimeoutDeferralHandle` fail with `E_FAIL`; nothing is launched.
+  (8) calls back zero times and returns `S_OK`. `XSpeechSynthesizerCreate` (9) hands out a silent synthesizer handle
+  (`E_POINTER` for a null out pointer). Close (10), set default voice (11) and set custom voice (12) accept that handle
+  and refuse any other with `E_INVALIDARG`. Streams from text (13) and SSML (21) are created from it and return a
+  stream handle; its close (14) accepts it. Stream size (15) reports 44 bytes and stream data (16) copies them: a valid
+  RIFF/WAVE header for 16 kHz, 16-bit mono PCM with zero data bytes, so a title that plays narration reads a silent
+  stream (a buffer under 44 bytes gets `ERROR_INSUFFICIENT_BUFFER`). A foreign handle on 15 or 16 gets `E_INVALIDARG`,
+  outputs zeroed. The closed-caption properties (3) and the speech-to-text display calls (6, 7, 17-20) fail with
+  `E_FAIL`, writing nothing: their parameter lists are not in the docs' layout.
+- **`XLauncherImpl`** (`IXLauncherImpl`, slots 3-5): `XLaunchUri` fails with `E_FAIL`; nothing is launched.
+  `XDisplayAcquireTimeoutDeferral` (4) creates a Win32 `PowerRequestDisplayRequired` request and returns its handle (a
+  failing `PowerCreateRequest` or `PowerSetRequest` returns the Win32 error as an HRESULT).
+  `XDisplayCloseTimeoutDeferralHandle` (5) clears that request and closes the handle, so the display may sleep again.
 - **ASSUMPTION:** the parameter lists of the speech calls and `XHighContrastGetMode` (Off is 0), from the GDK
   reference; only the argument counts were measured, from `tools/gdk_runtime_calls.py` on the executable.
 - **HDR:** `XDisplayTryEnableHdrMode` answers Disabled, because the host output is SDR. With `LEONIDA_HDR=1` it
@@ -495,11 +508,12 @@ layout with the documented argument count, and each behaves as Microsoft's refer
 
 | Class | Interface asked for | Slots (args after `this`) | Offline behaviour |
 |---|---|---|---|
-| `XGameRuntimeFeatureImpl` | its class id | 3 `XGameRuntimeIsFeatureAvailable` (1, returns `bool`) | True when `QueryApiImpl` serves the class the feature's functions go through (whichever `xgameruntime*.cpp` serves it) and the feature is documented for Windows: today XAccessibility, XSpeechSynthesizer, XLauncher, XAsync, XAsyncProvider, XTaskQueue, XThread, XError, XGame, XGameSave, XGameUI, XNetworking, XPackage, XPersistentLocalStorage, XStore, XSystem, XUser, XGameEvent, XGameStreaming. False for XDisplay (served, but documented for the consoles only), for the classes not served (XAppCapture, XGameInvite) and for values past the enum |
+| `XGameRuntimeFeatureImpl` | its class id | 3 `XGameRuntimeIsFeatureAvailable` (1, returns `bool`) | True when `QueryApiImpl` serves the class the feature's functions go through (whichever `xgameruntime*.cpp` serves it) and the feature is documented for Windows: today XAccessibility, XAppCapture, XSpeechSynthesizer, XLauncher, XAsync, XAsyncProvider, XTaskQueue, XThread, XError, XGame, XGameSave, XGameUI, XNetworking, XPackage, XPersistentLocalStorage, XStore, XSystem, XUser, XGameEvent, XGameStreaming. False for XDisplay (served, but documented for the consoles only), for the classes not served (XGameInvite) and for values past the enum |
 | `XSystemAnalyticsImpl` | its class id | 3 `XSystemGetAnalyticsInfo` (1: the result's address, as MSVC passes a returned struct to a member function) | The named export's `XSystemAnalyticsInfo` |
 
-Not served yet, though `libHttpClient.GDK.dll` has thunks for them: `XAppCaptureImpl` and `XGameInviteImpl`,
-among others.
+Not served yet, though `libHttpClient.GDK.dll` has thunks for them: `XGameInviteImpl`, among others.
+`XAppCaptureImpl` is served offline (`runtime/shims/xgameruntime_offline.cpp`): its class and interface ids answer,
+`XAppCaptureTakeScreenshot` (5) returns `ERROR_NOT_SUPPORTED`, and slots 3 and 4 go through the unknown-slot path.
 
 Which classes the package's GDK modules reference, from a byte search for the class and interface GUIDs that
 xgameruntime-docs lists (16-byte in-memory form, every `.dll` of the package; counts only, nothing else read):
@@ -530,9 +544,9 @@ therefore needs no module name beyond the `xgameruntime.dll` it already has, whi
 
 | Class | Thunks | Referenced | Served |
 |---|---:|---:|---|
-| `XAccessibilityImpl` | 10 | 9 | no |
-| `XAppCaptureImpl` | 1 | 1 | no |
-| `XLauncherImpl` | 3 | 3 | no |
+| `XAccessibilityImpl` | 10 | 9 | yes |
+| `XAppCaptureImpl` | 1 | 1 | yes |
+| `XLauncherImpl` | 3 | 3 | yes |
 | `XDisplayImpl` | 1 | 1 | yes |
 | `XGameEventImpl` | 1 | 1 | yes |
 | `XGameImpl` | 2 | 2 | yes |
@@ -548,10 +562,10 @@ therefore needs no module name beyond the `xgameruntime.dll` it already has, whi
 | `XThreadingImpl` | 18 | 17 | yes |
 | `XUserImpl` | 21 | 21 | yes |
 
-"Served" is the tool's answer for the runtime sources at that commit. The three that are not: `XAccessibilityImpl`
-(the speech-synthesizer slots 8-13, 15, 16 and 21 are referenced; slot 14 is not), `XAppCaptureImpl` (slot 5,
-`XAppCaptureTakeScreenshot`) and `XLauncherImpl` (slots 3-5: `XLaunchUri` and the two display timeout-deferral calls).
-Open pull requests serve them: #4235, #4307 and #4248. The slots of `XUserImpl`, `XStoreImpl` and `XGameSaveImpl` the
+"Served" is the tool's answer for the runtime sources on this branch (`served_classes` over every `runtime/shims/*.cpp`):
+every class in the table is served now, `XAppCaptureImpl` and `XLauncherImpl` included. The executable references the
+speech-synthesizer slots 8-13, 15, 16 and 21 (slot 14 is not), `XAppCaptureImpl` slot 5 (`XAppCaptureTakeScreenshot`)
+and `XLauncherImpl` slots 3-5 (`XLaunchUri` and the two display timeout-deferral calls). The slots of `XUserImpl`, `XStoreImpl` and `XGameSaveImpl` the
 executable calls, and the argument counts the tool estimates from the registers, are in the report the tool writes.
 `XErrorImpl`, which `XCurl.dll` and `libHttpClient.GDK.dll` call, is not among the executable's classes.
 

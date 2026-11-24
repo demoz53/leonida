@@ -293,19 +293,35 @@ int main() {
     check(at<EnumVoices>(acc, 8)(acc, reinterpret_cast<void*>(&on_state), nullptr) == S_OK &&
               at<EnumVoices>(acc, 8)(acc, nullptr, nullptr) == E_INVALIDARG,
           "XSpeechSynthesizerEnumerateInstalledVoices: no voices, S_OK (a callback is required)");
-    void* synth = reinterpret_cast<void*>(1);
-    check(at<SpeechCreate>(acc, 9)(acc, &synth) == E_FAIL && synth == nullptr,
-          "XSpeechSynthesizerCreate fails offline and nulls the handle");
-    void* stream = reinterpret_cast<void*>(1);
-    size_t size = 5, got = 5;
+    void* synth = nullptr;
+    check(at<SpeechCreate>(acc, 9)(acc, &synth) == S_OK && synth != nullptr &&
+              at<SpeechCreate>(acc, 9)(acc, nullptr) == E_POINTER,
+          "XSpeechSynthesizerCreate returns a silent synthesizer handle");
+    void* stream = nullptr;
+    size_t size = 0, got = 0;
     check(at<SpeechClose>(acc, 10)(acc, nullptr) == E_INVALIDARG && at<SpeechClose>(acc, 11)(acc, nullptr) == E_INVALIDARG &&
               at<SpeechClose>(acc, 12)(acc, nullptr) == E_INVALIDARG && at<SpeechClose>(acc, 14)(acc, nullptr) == E_INVALIDARG,
           "close and set-voice calls on a null handle: E_INVALIDARG");
+    check(at<SpeechClose>(acc, 11)(acc, synth) == S_OK, "XSpeechSynthesizerSetDefaultVoice succeeds on valid handle");
     check(at<SpeechStream>(acc, 13)(acc, nullptr, "hi", &stream) == E_INVALIDARG && stream == nullptr,
           "CreateStreamFromText on a null synthesizer: E_INVALIDARG, no stream");
-    stream = reinterpret_cast<void*>(1);
-    check(at<SpeechStream>(acc, 21)(acc, nullptr, "<speak/>", &stream) == E_INVALIDARG && stream == nullptr,
-          "CreateStreamFromSsml on a null synthesizer: E_INVALIDARG, no stream");
+    check(at<SpeechStream>(acc, 13)(acc, synth, "Hello", &stream) == S_OK && stream != nullptr,
+          "CreateStreamFromText returns a silent WAVE stream");
+    check(at<StreamSize>(acc, 15)(acc, stream, &size) == S_OK && size == 44,
+          "GetStreamDataSize reports the 44-byte empty WAVE header");
+    uint8_t wav[64] = {};
+    check(at<StreamData>(acc, 16)(acc, stream, 8, wav, &got) == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER) && got == 0,
+          "GetStreamData rejects an undersized buffer with ERROR_INSUFFICIENT_BUFFER");
+    check(at<StreamData>(acc, 16)(acc, stream, sizeof(wav), wav, &got) == S_OK && got == 44 &&
+              std::memcmp(wav, "RIFF", 4) == 0 && std::memcmp(wav + 8, "WAVEfmt ", 8) == 0 &&
+              std::memcmp(wav + 36, "data", 4) == 0,
+          "GetStreamData writes a valid silent 16 kHz mono 16-bit PCM WAVE header");
+    check(at<SpeechClose>(acc, 14)(acc, stream) == S_OK, "XSpeechSynthesizerCloseStreamHandle succeeds");
+    stream = nullptr;
+    check(at<SpeechStream>(acc, 21)(acc, synth, "<speak/>", &stream) == S_OK && stream != nullptr &&
+              at<SpeechClose>(acc, 14)(acc, stream) == S_OK,
+          "CreateStreamFromSsml returns a silent WAVE stream");
+    check(at<SpeechClose>(acc, 10)(acc, synth) == S_OK, "XSpeechSynthesizerCloseHandle succeeds");
     check(at<StreamSize>(acc, 15)(acc, nullptr, &size) == E_INVALIDARG && size == 0 &&
               at<StreamData>(acc, 16)(acc, nullptr, 8, nullptr, &got) == E_INVALIDARG && got == 0,
           "stream size and data on a null stream: E_INVALIDARG, zero written");
@@ -317,17 +333,36 @@ int main() {
     void* launcher = nullptr;
     check(query(&kLauncherClass, kLauncherClass, &launcher) == S_OK && launcher, "XLauncherImpl for its class id");
     if (!launcher) return 1;
-    void* deferral = reinterpret_cast<void*>(1);
+    void* deferral = nullptr;
+    using CloseDeferral = void(STDMETHODCALLTYPE*)(void*, void*);
     check(at<LaunchUri>(launcher, 3)(launcher, nullptr, "https://example.com") == E_FAIL,
           "XLaunchUri is not available offline");
-    check(at<AcquireDeferral>(launcher, 4)(launcher, &deferral) == E_FAIL && deferral == nullptr &&
-              at<NoArgs>(launcher, 5)(launcher) == E_FAIL,
-          "the display timeout deferral is not available offline");
+    check(at<AcquireDeferral>(launcher, 4)(launcher, nullptr) == E_POINTER,
+          "XDisplayAcquireTimeoutDeferral rejects null out pointer");
+    check(at<AcquireDeferral>(launcher, 4)(launcher, &deferral) == S_OK && deferral != nullptr,
+          "XDisplayAcquireTimeoutDeferral acquires a display power request handle");
+    at<CloseDeferral>(launcher, 5)(launcher, deferral);
+    at<CloseDeferral>(launcher, 5)(launcher, nullptr);
+    check(true, "XDisplayCloseTimeoutDeferralHandle closes handle and ignores null");
     GUID other = kLauncherClass;
     other.Data1 ^= 1;
     void* none = reinterpret_cast<void*>(1);
     check(query(&kLauncherClass, other, &none) == E_NOINTERFACE && none == nullptr,
           "XLauncherImpl refuses an interface id it doesn't implement");
+
+    // ---- XAppCapture ----
+    const GUID kAppCaptureClass = {0xa4f1aee2, 0x4bf1, 0x4485, {0xb0, 0x08, 0xa7, 0xc2, 0x6d, 0x52, 0xac, 0x27}};
+    const GUID kAppCaptureIid = {0x22e672d7, 0xb4e3, 0x406c, {0xbd, 0x50, 0x8f, 0x0d, 0x25, 0x23, 0x6f, 0x9e}};
+    void* capture = nullptr;
+    void* capture_iid = nullptr;
+    check(query(&kAppCaptureClass, kAppCaptureClass, &capture) == S_OK && capture &&
+              query(&kAppCaptureClass, kAppCaptureIid, &capture_iid) == S_OK && capture_iid == capture,
+          "XAppCaptureImpl answers its class id and interface id");
+    if (capture) {
+        using TakeShot = HRESULT(STDMETHODCALLTYPE*)(void*, void*, void*);
+        check(at<TakeShot>(capture, 5)(capture, nullptr, nullptr) == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED),
+              "XAppCaptureTakeScreenshot returns ERROR_NOT_SUPPORTED offline");
+    }
 
     std::printf("xgameruntime_offline_test: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

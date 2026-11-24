@@ -126,6 +126,7 @@ if(WIN32 AND LEONIDA_BUILD_WINDOWS_RUNTIME)
     shims/xgameruntime_offline.cpp
     shims/library_loader.cpp
     shims/process.cpp
+    shims/lifecycle.cpp
     shims/com_shim.cpp
     shims/bcrypt_rng.cpp
     shims/xapu_chad.cpp
@@ -293,6 +294,18 @@ if(WIN32 AND LEONIDA_BUILD_WINDOWS_RUNTIME)
   target_compile_options(process_cmdline_test PRIVATE /W4 /permissive- /utf-8)
   target_link_options(process_cmdline_test PRIVATE /OPT:NOREF)
   target_link_libraries(process_cmdline_test PRIVATE shell32)
+
+  # Console lifecycle shim: RegisterAppStateChangeNotification, oversized window fitting, and subclass forwarding.
+  add_executable(lifecycle_test
+    test/lifecycle_test.cpp
+    shims/lifecycle.cpp
+    shims/registry.cpp
+  )
+  target_include_directories(lifecycle_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shims)
+  target_compile_definitions(lifecycle_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_compile_options(lifecycle_test PRIVATE /W4 /permissive- /utf-8)
+  target_link_options(lifecycle_test PRIVATE /OPT:NOREF)
+  target_link_libraries(lifecycle_test PRIVATE user32)
 
   # Console paths (GAME:) and the write overlay: the file shims resolved through the registry, over temporary folders.
   add_executable(file_system_test
@@ -1186,6 +1199,9 @@ if(BUILD_TESTING)
   endif()
   if(WIN32 AND TARGET process_cmdline_test)
     add_test(NAME process_cmdline COMMAND process_cmdline_test)
+  endif()
+  if(WIN32 AND TARGET lifecycle_test)
+    add_test(NAME lifecycle COMMAND lifecycle_test)
   endif()
   if(WIN32 AND TARGET file_system_test)
     add_test(NAME file_system COMMAND file_system_test)
