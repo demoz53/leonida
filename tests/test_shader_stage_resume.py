@@ -94,9 +94,7 @@ class ShaderStageResumeTest(unittest.TestCase):
             elif p == os.path.join(self.dxbc, "fssm_index.json"):
                 json.dump([{"name": "s0"}], f)
             elif p == os.path.join(self.spirv, "index.json"):
-                with open(os.path.join(self.dxbc, "index.json"), encoding="utf-8") as source:
-                    carved = json.load(source)
-                json.dump({os.path.splitext(entry["file"])[0]: {"stage": "vs"} for entry in carved}, f)
+                json.dump({name: {"stage": "vs"} for name in make_game.disassembly_listings(self.dxbc) or {"s0"}}, f)
             elif p.endswith(".s"):
                 f.write("synthetic listing\n")
 
@@ -231,9 +229,13 @@ class ShaderStageResumeTest(unittest.TestCase):
             original(tool, *args)
             self.touch(self.dxbc, "disasm", "s1.s")
 
-        with mock.patch.object(self, "fake_py", side_effect=disassemble):
-            self.assertEqual(self.run_stage(), ["shader_disasm.py", "translate"])
-        self.assertEqual(self.run_stage(), [])
+        # Two of the three inputs disassemble. The stage records both listings before reporting the short index.
+        with mock.patch.object(self, "fake_py", side_effect=disassemble), self.assertRaises(SystemExit):
+            self.run_stage()
+        self.assertEqual(self.ran, ["shader_disasm.py", "translate"])
+        with self.assertRaises(SystemExit):
+            self.run_stage()
+        self.assertEqual(self.ran, [])
         os.remove(os.path.join(self.dxbc, "disasm", "s1.s"))
         self.assertFalse(make_game.shader_outputs_reusable(self.work, False, False))
 
@@ -248,6 +250,7 @@ class ShaderStageResumeTest(unittest.TestCase):
             self.assertIn("--skip-existing", args)
             self.assertTrue(os.path.isfile(os.path.join(self.dxbc, "disasm", "s0.s")))
             disassemble(tool, *args)
+            self.touch(self.dxbc, "disasm", "unsupported.s")
 
         with mock.patch.object(self, "fake_py", side_effect=repair):
             self.assertEqual(self.run_stage(), ["shader_disasm.py", "translate"])
