@@ -802,6 +802,7 @@ enum class ReplayResult {
     invalid_query,
     invalid_indirect_arguments,
     invalid_draw,  // DispatchMesh with a pipeline that has no mesh shader, or a vertex draw with one that has
+    unsupported_mesh_indirect_count,
     unsupported
 };
 
@@ -859,6 +860,7 @@ struct ReplayFunctions {
     PFN_vkCmdSetDepthBounds set_depth_bounds = nullptr;
     PFN_vkCmdDraw draw = nullptr;
     PFN_vkCmdDrawMeshTasksEXT draw_mesh_tasks = nullptr;  // VK_EXT_mesh_shader; null: mesh draws are unsupported
+    PFN_vkCmdDrawMeshTasksIndirectEXT draw_mesh_tasks_indirect = nullptr;
     PFN_vkCmdDrawIndexed draw_indexed = nullptr;
     std::function<const GraphicsPipeline*(std::uintptr_t)> graphics_pipeline;
     // The buffer and offset a console VA range starts in (from ResourceBinding::va), false when none does. `size` is
@@ -1562,6 +1564,7 @@ inline VkDeviceSize indirect_record_size(IndirectKind kind) {
     case IndirectKind::draw: return sizeof(VkDrawIndirectCommand);
     case IndirectKind::draw_indexed: return sizeof(VkDrawIndexedIndirectCommand);
     case IndirectKind::dispatch: return sizeof(VkDispatchIndirectCommand);
+    case IndirectKind::dispatch_mesh: return 0;  // Mesh dispatches use Draw to capture graphics state.
     }
     return 0;
 }
@@ -2168,7 +2171,8 @@ ReplayResult prepare_draw(const Draw& draw, Resolve&& resolve, const ReplayFunct
     const GraphicsPipeline* pipeline = vk.graphics_pipeline(draw.pipeline);
     if (!pipeline || !pipeline->pipeline) return ReplayResult::unresolved_resource;
     if (pipeline->mesh != draw.mesh) return ReplayResult::invalid_draw;
-    if (draw.mesh && !vk.draw_mesh_tasks) return ReplayResult::unsupported;
+    if (draw.mesh_indirect && !vk.draw_mesh_tasks_indirect) return ReplayResult::unsupported;
+    if (draw.mesh && !draw.mesh_indirect && !vk.draw_mesh_tasks) return ReplayResult::unsupported;
     if (pipeline->depth_bounds && !vk.set_depth_bounds) return ReplayResult::unsupported;
     if (pipeline->bindless_set && !vk.bind_descriptor_sets) return ReplayResult::unsupported;
     if (pipeline->color_formats.size() > max_render_targets) return ReplayResult::unsupported;
@@ -2519,7 +2523,6 @@ inline ReplayResult plan_overlapping_statistics_segments(PreparedList& out) {
                 p.statistics_end = current;
                 current = open();
                 p.statistics_begin = current;
-                continue;
             }
             // A draw of the other kind than the open segment's starts a segment in its own pool (D3D-291).
             int draw = -1;
@@ -3264,6 +3267,26 @@ ReplayResult prepare(const CommandList& list, Resolve&& resolve, const ReplayFun
             if (pipeline->bindless_set && !vk.bind_descriptor_sets) return ReplayResult::unsupported;
             p.pipeline = *pipeline;
         } else if (const auto* draw = std::get_if<Draw>(&command)) {
+            if (draw->mesh_indirect) {
+                const auto& args = *draw->mesh_indirect;
+                if (!bind(args.buffer) || !p.binding.buffer) return ReplayResult::unresolved_resource;
+                if (!draw->mesh || args.stride < sizeof(VkDrawMeshTasksIndirectCommandEXT) || args.stride % 4 ||
+                    !detail::indirect_range(p.binding, args.offset, VkDeviceSize(args.count) * args.stride))
+                    return ReplayResult::invalid_indirect_arguments;
+                if (args.count_buffer) {
+                    const ResourceBinding* count = resolve(args.count_buffer);
+                    if (!count || !count->buffer) return ReplayResult::unresolved_resource;
+                    if (!detail::indirect_range(*count, args.count_offset, sizeof(std::uint32_t)))
+                        return ReplayResult::invalid_indirect_arguments;
+                    // Clamp the GPU count before executing any draw, including when the count is UINT32_MAX.
+                    if (!vk.prepare_counted_dispatch || !vk.emit_counted_dispatch ||
+                        (statistics_active && !statistics_helpers) ||
+                        !vk.prepare_counted_dispatch(p.binding.buffer, p.binding.buffer_offset + args.offset,
+                                                     count->buffer, count->buffer_offset + args.count_offset,
+                                                     args.stride, args.count, p.counted_dispatch))
+                        return ReplayResult::unsupported_mesh_indirect_count;
+                }
+            }
             if (out.draw_count == out.draws.size()) out.draws.emplace_back();
             auto& prepared_draw = out.draws[out.draw_count];
             prepared_draw.reset();
@@ -3565,6 +3588,8 @@ inline void emit(const PreparedList& prepared, VkCommandBuffer command_buffer, c
         // draw's own rendering scope begins.
         if (std::holds_alternative<Draw>(command) || std::holds_alternative<ExecuteIndirect>(command)) {
             end_statistics();
+            if (std::holds_alternative<Draw>(command) && p.counted_dispatch.indirect)
+                vk.emit_counted_dispatch(command_buffer, p.counted_dispatch);
             begin_statistics();
         }
         if (const auto* predication = std::get_if<Predication>(&command)) {
@@ -4344,7 +4369,16 @@ inline void emit(const PreparedList& prepared, VkCommandBuffer command_buffer, c
                 vk.bind_vertex_buffers2(command_buffer, slot, 1, &d.vertex_buffers[slot], &d.vertex_offsets[slot],
                                         &d.vertex_sizes[slot], &d.vertex_strides[slot]);
             }
-            if (draw->mesh) {
+            if (draw->mesh_indirect) {
+                const auto& args = *draw->mesh_indirect;
+                const bool counted = p.counted_dispatch.indirect != VK_NULL_HANDLE;
+                const VkBuffer buffer = counted ? p.counted_dispatch.indirect : p.binding.buffer;
+                const VkDeviceSize offset = counted ? p.counted_dispatch.offset : p.binding.buffer_offset + args.offset;
+                const VkDeviceSize stride = counted ? sizeof(VkDrawMeshTasksIndirectCommandEXT) : args.stride;
+                // A single record per call also works without Vulkan's multiDrawIndirect feature.
+                for (std::uint32_t record = 0; record < args.count; ++record)
+                    vk.draw_mesh_tasks_indirect(command_buffer, buffer, offset + record * stride, 1, 0);
+            } else if (draw->mesh) {
                 vk.draw_mesh_tasks(command_buffer, draw->count, draw->instances, draw->first);
             } else if (draw->indexed) {
                 vk.bind_index_buffer(command_buffer, d.index_buffer, d.index_offset, d.index_type);
