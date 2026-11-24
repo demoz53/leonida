@@ -17,6 +17,7 @@
 #include "d3d12_depth24_compare.h"  // D24 clears compared with the host runtime
 #include "../src/vulkan_memory.h"  // D3D-96: resizable_bar
 
+#include <d3d12video.h>
 #include <dxgi1_4.h>
 
 #include <dxgi1_4.h>
@@ -4070,7 +4071,11 @@ int compare_invalid_arguments(ID3D12Device* ours) {
              return command_allocator(d, D3D12_COMMAND_LIST_TYPE(3));
          }},
         {"command allocator: type video encode", [](ID3D12Device* d) {
-             return command_allocator(d, D3D12_COMMAND_LIST_TYPE(6));
+             return command_allocator(d, D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE);
+         }, [](ID3D12Device* d) {
+             // A host without the D3D12 video interface, such as WARP on Windows 10, rejects video allocators.
+             Ref<ID3D12VideoDevice> video;
+             return d->QueryInterface(IID_PPV_ARGS(&video.p)) != E_NOINTERFACE;
          }},
         {"command allocator: type 7", [](ID3D12Device* d) { return command_allocator(d, D3D12_COMMAND_LIST_TYPE(7)); }},
         {"command allocator: type 99", [](ID3D12Device* d) {
