@@ -128,6 +128,41 @@ class TestRetag(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "two Ogg pages"):
             T.retag(data[:first], T.tags_packet([]))
 
+    def test_retag_rejects_serial_mismatch_sequence_gap_and_continuation_flags(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "b", "0ABCDEF1.ogg")
+            make_ogg(path, packets=3, stream_id=0x11111111)
+            original = Path(path).read_bytes()
+        raw_pages = [original[s:e] for s, e in T.pages(original)]
+        p0, p1, p2 = raw_pages[0], raw_pages[1], raw_pages[2]
+        head_pkt = p0[27 + p0[26]:]
+        new_tags = T.tags_packet([("TITLE", "new")])
+
+        cases = [
+            ("page 0 sequence != 0",
+             awc_opus.ogg_page(0x11111111, 2, 0, [head_pkt], 0x02) + p1 + p2,
+             "sequence number 0"),
+            ("page 0 serial mismatch",
+             awc_opus.ogg_page(0x22222222, 0, 0, [head_pkt], 0x02) + p1 + p2,
+             "serial mismatch"),
+            ("audio page serial mismatch",
+             p0 + p1 + awc_opus.ogg_page(0x33333333, 2, 1000, [PACKET], 0x04),
+             "serial mismatch"),
+            ("audio page sequence gap",
+             p0 + p1 + awc_opus.ogg_page(0x11111111, 5, 1000, [PACKET], 0x04),
+             "non-contiguous"),
+            ("OpusTags continuation flag",
+             p0 + awc_opus.ogg_page(0x11111111, 1, 0, [T.tags_packet([])], 0x01) + p2,
+             "continuation page"),
+            ("OpusTags EOS flag",
+             p0 + awc_opus.ogg_page(0x11111111, 1, 0, [T.tags_packet([])], 0x04) + p2,
+             "BOS/EOS"),
+        ]
+        for label, bad_data, pattern in cases:
+            with self.subTest(case=label):
+                with self.assertRaisesRegex(ValueError, pattern):
+                    T.retag(bad_data, new_tags)
+
 
 class TestFolder(unittest.TestCase):
     def setUp(self):

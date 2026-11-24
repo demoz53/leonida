@@ -90,9 +90,22 @@ def retag(data: bytes, packet: bytes) -> bytes:
         raise ValueError("tags do not fit in one page")
     it = checked_pages(data)
     try:
-        _, (tags_at, tags_end) = next(it), next(it)
+        (head_at, _head_end), (tags_at, tags_end) = next(it), next(it)
     except StopIteration:
         raise ValueError("fewer than two Ogg pages") from None
+    head_serial, head_seq = struct.unpack_from("<II", data, head_at + 14)
+    if head_seq != 0:
+        raise ValueError("page 0 does not have sequence number 0")
+    serial, seq = struct.unpack_from("<II", data, tags_at + 14)
+    if serial != head_serial:
+        raise ValueError("Ogg bitstream serial mismatch")
+    if seq != 1:
+        raise ValueError("the OpusTags page is not page 1")
+    tags_flags = data[tags_at + 5]
+    if tags_flags & 0x01:
+        raise ValueError("the OpusTags page is a continuation page")
+    if tags_flags & 0x06:
+        raise ValueError("the OpusTags page has unexpected BOS/EOS flags")
     body = tags_at + 27 + data[tags_at + 26]
     if data[body:body + 8] != b"OpusTags":
         raise ValueError("page 1 does not start an OpusTags packet")
@@ -101,11 +114,14 @@ def retag(data: bytes, packet: bytes) -> bytes:
         raise ValueError("the OpusTags packet continues past page 1")
     if any(segment != 255 for segment in segments[:-1]):
         raise ValueError("the OpusTags page contains another packet")
-    for _ in it:  # also check the audio tail before publishing any replacement
-        pass
-    serial, seq = struct.unpack_from("<II", data, tags_at + 14)
-    if seq != 1:
-        raise ValueError("the OpusTags page is not page 1")
+    expected_seq = 2
+    for page_at, _page_end in it:  # also check the audio tail before publishing any replacement
+        page_serial, page_seq = struct.unpack_from("<II", data, page_at + 14)
+        if page_serial != head_serial:
+            raise ValueError("Ogg bitstream serial mismatch")
+        if page_seq != expected_seq:
+            raise ValueError("non-contiguous Ogg page sequence")
+        expected_seq = (expected_seq + 1) & 0xFFFFFFFF
     return data[:tags_at] + ogg_page(serial, 1, 0, [packet], 0x00) + data[tags_end:]
 
 
