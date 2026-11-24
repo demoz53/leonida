@@ -2,13 +2,14 @@
 
 The GPU tests are small hand-written RDNA2 programs in `runtime/test/shaders`. They are translated to SPIR-V and run
 on your GPU, and the results are compared with what the RDNA2 hardware gives. They need no game files, and every
-result helps: post it in [#166](https://github.com/ItsNotRexed/Leonida/issues/166), one comment per GPU and driver.
+result helps: submit a pull request adding a record under [`gpu-test-results/`](../gpu-test-results), following
+the existing files there and [CONTRIBUTING.md](../CONTRIBUTING.md).
 If your GPU is already covered there, testing an open pull request from the review queue in the [coordination
 issue][claims] helps more.
 
 This page collects the setup steps and the problems testers have run into so far.
 
-[claims]: https://github.com/ItsNotRexed/Leonida/issues?q=is%3Aissue%20is%3Aopen%20in%3Atitle%20%22Coordinating%20who%20works%20on%20what%22
+[claims]: https://github.com/ubiquitarianism/leonida/issues/14
 
 ## What you need
 
@@ -143,7 +144,7 @@ Write-Output "Test exit code: $LASTEXITCODE"
 ```
 
 Report the executable name, the workflow run and its commit, your GPU and driver,
-the exit code, and the test summary in [#166](https://github.com/ItsNotRexed/Leonida/issues/166).
+the exit code, and the test summary in your `gpu-test-results/` record.
 Label it as a single-test run so the result is easy to distinguish from a full suite run.
 
 ## Run them
@@ -708,9 +709,14 @@ CS, 10,974 PS).
 
 ## Posting your result
 
-Use the template at the top of [#166](https://github.com/ItsNotRexed/Leonida/issues/166): GPU, driver, subgroup
-range, OS, the commit you built, the tool versions and the counts each script printed. Post counts and pass/fail
-lines only, never shaders or logs from the game. A failure that isn't in the table above gets its own issue, linked
-from your entry.
+Submit a pull request adding a file under [`gpu-test-results/`](../gpu-test-results), using the existing files
+there as format examples. Follow [CONTRIBUTING.md](../CONTRIBUTING.md) and claim the work in the
+[coordination issue][claims] before opening the pull request.
 
-Use your system's detected CPU, GPU, VRAM and RAM model names in the #166 entry, not benchmark scores. For a rough browser-based check against reference profiles, you can use [Can I Run Leonida](https://assttro.github.io/can-i-run-leonida/).
+Include your GPU, driver, subgroup range, OS, the commit you built, the tool versions, and the pass, skip and fail
+counts each script printed. Label a single-test run clearly instead of presenting it as a full suite run.
+Post counts and pass/fail lines only, never shaders or logs from the game. A failure that is not in the table
+above gets its own issue, linked from your record.
+
+Use your system's detected CPU, GPU, VRAM and RAM model names in your result record, not benchmark scores.
+For a rough browser-based check against reference profiles, you can use [Can I Run Leonida](https://assttro.github.io/can-i-run-leonida/).
