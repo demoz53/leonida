@@ -107,7 +107,8 @@ class ExeShaTests(unittest.TestCase):
         self.assertEqual(got["mismatches"], [])
 
     def test_print_keys_writes_the_manifest_lines(self):
-        code, out, _ = run(str(self.exe), "--print-keys")
+        # Its own manifest without the two keys: the repository's records the retail size, which this file lacks.
+        code, out, _ = run(str(self.exe), "--manifest", str(self.manifest()), "--print-keys")
         self.assertEqual(code, 0)
         self.assertIn(f'"expected_exe_size": {self.size},', out)
         self.assertIn(f'"expected_exe_sha256": "{self.sha}"', out)
