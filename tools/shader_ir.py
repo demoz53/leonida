@@ -4,7 +4,8 @@ Each instruction: {"op": mnemonic, "args": [operand...], "mods": [modifier...], 
 Operand kinds: sgpr s5 / s[4:7], vgpr v3 / v[0:3], special (vcc, exec, m0, scc...), inline constant, literal,
 label/offset (for branches), hw register, and raw text for anything else.
 
-As a module: parse_file(path) -> {"name", "code_start", "insns": [...], "invalid": [pc...]}
+As a module: parse_file(path) -> {"name", "code_start", "insns": [...], "invalid": N}, where N counts the
+               "invalid instruction encoding" lines in the disassembly
 As a tool:  python -I shader_ir.py <disasm dir> [--limit N]   (parses everything and reports coverage)
 Usage: `python -I tools/shader_ir.py --help` lists the options.
 """
