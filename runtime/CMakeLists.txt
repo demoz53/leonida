@@ -2000,6 +2000,13 @@ if(TARGET Vulkan::Headers)
     target_compile_options(d3d12_fence_timing_test PRIVATE /W4 /permissive- /utf-8)
     add_test(NAME d3d12_fence_timing COMMAND d3d12_fence_timing_test)
     set_tests_properties(d3d12_fence_timing PROPERTIES SKIP_RETURN_CODE 77)
+    # CPU subresource copies through the staging queue wait for their own submission, not the direct queue (D9).
+    add_executable(d3d12_staged_copy_wait_test test/d3d12_staged_copy_wait_test.cpp)
+    target_link_libraries(d3d12_staged_copy_wait_test PRIVATE gta6rt_d3d12_com)
+    target_compile_definitions(d3d12_staged_copy_wait_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(d3d12_staged_copy_wait_test PRIVATE /W4 /permissive- /utf-8)
+    add_test(NAME d3d12_staged_copy_wait COMMAND d3d12_staged_copy_wait_test)
+    set_tests_properties(d3d12_staged_copy_wait PROPERTIES SKIP_RETURN_CODE 77)
     # Fence events the host runtime sets or refuses (released fences, no fences), compared with the host devices.
     add_executable(d3d12_fence_events_test test/d3d12_fence_events_test.cpp)
     target_link_libraries(d3d12_fence_events_test PRIVATE gta6rt_d3d12_com d3d12 dxgi)
