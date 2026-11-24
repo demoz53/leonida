@@ -904,6 +904,9 @@ public:
             cmd.draw = leonida::Draw{graphics_pipeline_, graphics_.data, draw_views(), depth_, index_, topology_,
                                      viewport_, scissor_, blend_factor_, front_stencil_ref_, back_stencil_ref_,
                                      kind == leonida::IndirectKind::draw_indexed, 0, 0, 0, 0, 0};
+            // As record_draw: the bound depth bounds.
+            cmd.draw.depth_bounds_min = depth_bounds_min_;
+            cmd.draw.depth_bounds_max = depth_bounds_max_;
         }
         check(list_.execute_indirect(cmd));
     }
