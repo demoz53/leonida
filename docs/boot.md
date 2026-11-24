@@ -32,6 +32,11 @@ DllMain/TLS results, exceptions with their stack frames, the exit, and the D3D12
 per method. The `[rt]` lines in the same stderr log carry the device parameters, feature ids and warnings; the
 summary leaves them as a count, so grep `^\[rt\]` for those.
 
+For `xmem_physical_pages`, the shim records the first request for each distinct attribute word. The text and
+JSON summaries list the API, raw attribute word, requested page count and caller for the first `--limit`
+records in trace order. Use `--limit 0` to keep the total with no records. Text shows how many records were
+omitted, and JSON keeps the full count in `startup.kinds.xmem_physical_pages`.
+
 ## 2. Commands
 
 Windows (from the repository root):
