@@ -38,6 +38,7 @@ EXPECT = {
     "ps_w64_a_uniform_vote": ("A", [], []),
 
     "ps_w64_a_discard": ("A", [], []),
+    "ps_w64_a_sat_pk_hi": ("A", [], []),
     "ps_w64_b_waterfall": ("B", [], ["waterfall"]),
     "ps_w64_b_readfirstlane": ("B", [], ["readfirstlane-uniform"]),
     "ps_w64_b_readlane_uniform": ("B", [], ["readlane-uniform"]),
@@ -51,6 +52,7 @@ EXPECT = {
     "ps_w64_c_vote_else": ("C", ["unsafe-vote-branch"], None),
     "ps_w64_c_scc_vote": ("C", ["cross-lane"], None),
     "ps_w64_c_execz_sgpr": ("C", ["stale-scalar", "unsafe-execz-branch"], None),
+    "ps_w64_c_sat_pk_hi": ("C", ["lane-id"], None),
     "vs_w64_a_skip": ("A", [], []),
     "vs_w64_b_waterfall": ("B", [], ["waterfall"]),
     "vs_w64_b_readlane_uniform": ("B", [], ["readfirstlane-uniform", "readlane-uniform"]),
@@ -173,6 +175,14 @@ def test_expected_words_of_the_gpu_fixtures():
     assert w64_graphics._vs_a_skip(6 + 64 * 2) == (1006, 0, 2000 + 2 + 9, 3)
     assert w64_graphics._vs_b_readlane_uniform(70) == (6 + 123, 200, 6 + 123, 277)
     assert w64_graphics._vs_c_lane_id(700) == (None, None, 700, 0)
+    # sat_pk: x = 0, y = 0: lo = -128 -> 0, hi = 300 -> 255; x = 20, y = 40: lo = 32, hi = -20 -> 0;
+    # x = 63, y = 5: lo = 376 -> 255, hi = 260 -> 255; x = 17, y = 31: lo = 8, hi = 52
+    assert w64_graphics._a_sat_pk_hi(0) == (0x0000FF00, 0xFF00FF00, 0x5555FF00, 0x0000FF00)
+    p = 64 * 40 + 20
+    assert w64_graphics._a_sat_pk_hi(p) == (p << 16 | 0x20, (0xFF00 - p) << 16 | 0x20, (p ^ 0x5555) << 16 | 0x20,
+                                            20 << 24 | 40 << 16 | 0x20)
+    assert w64_graphics._a_sat_pk_hi(63 + 64 * 5)[0] == (63 + 64 * 5) << 16 | 0xFFFF
+    assert w64_graphics._c_sat_pk_hi(17 + 64 * 31) == (None, None, 52 << 8 | 8, 0)
 
 
 def test_vs_probe_and_radv_perftest(monkeypatch):

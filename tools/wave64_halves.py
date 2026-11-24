@@ -124,6 +124,8 @@ def partial_write(ins, op):
     name = op.split("_e32")[0].split("_e64")[0].split("_dpp")[0]
     if name.startswith(("v_pk_", "v_cvt_pk", "v_sad_")):
         return False
+    if name == "v_sat_pk_u8_i16":   # two u8 results packed into the low half: a 16-bit result whose first type is u8
+        return True
     first = next((p for p in name.split("_")[1:] if _TYPE.match(p)), None)
     if not (first and _TYPE16.match(first)):
         return False
@@ -136,9 +138,11 @@ _INT16_VOP2_OPS = (
     "v_mul_lo_u16", "v_max_u16", "v_min_u16", "v_max_i16", "v_min_i16", "v_and_b16", "v_or_b16",
     "v_xor_b16", "v_add_i16", "v_sub_i16",
 )
-# 16-bit-suffixed or -prefixed mnemonics that write the full 32-bit destination register.
+# 16-bit-suffixed or -prefixed mnemonics that write the full 32-bit destination register. Not v_sat_pk_u8_i16: its
+# two saturated bytes are a 16-bit result, and rdna2spirv writes them with write_lo16, which keeps the high half in
+# the _e32, _e64 and DPP forms (design.md, "v_sat_pk_u8_i16"), so it falls to the _i16 rule below.
 _FULL32_V16_PREFIXES = (
-    "v_pk_", "v_pack_", "v_cvt_pk", "v_sat_pk", "v_sad_", "v_msad_", "v_qsad_", "v_mqsad_",
+    "v_pk_", "v_pack_", "v_cvt_pk", "v_sad_", "v_msad_", "v_qsad_", "v_mqsad_",
     "v_cmp", "v_cmpx", "v_interp_p1", "v_dot", "v_cvt_f32_", "v_cvt_u32_", "v_cvt_i32_", "v_cvt_f64_",
     "v_mad_i32_", "v_mad_u32_",
 )

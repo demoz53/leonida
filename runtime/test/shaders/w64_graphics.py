@@ -119,6 +119,27 @@ def _c_vote_stale(i):
     return (None, int(_x(i) == 0 and _y(i) == 0), 0, 0)
 
 
+def _sat8(h):
+    """A signed 16-bit value saturated to an unsigned byte (v_sat_pk_u8_i16, ISA pseudocode)."""
+    h = h - 0x10000 if h & 0x8000 else h
+    return 0 if h <= 0 else min(h, 255)
+
+
+def _sat_pk(i):
+    """s of the sat_pk fixtures: SRC0 lo = 8x - 128, hi = 300 - 8y, each half saturated to a byte."""
+    return _sat8((300 - 8 * _y(i)) & 0xFFFF) << 8 | _sat8((8 * _x(i) - 128) & 0xFFFF)
+
+
+def _a_sat_pk_hi(i):
+    x, y, s = _x(i), _y(i), _sat_pk(i)
+    p = 64 * y + x
+    return (p << 16 | s, ((0xFF00 - p) & 0xFFFF) << 16 | s, (p ^ 0x5555) << 16 | s, x << 24 | y << 16 | s)
+
+
+def _c_sat_pk_hi(i):
+    return (None, None, _sat_pk(i), 0)                         # r0, r1 hold the lane id in the kept high half
+
+
 def _on(i):
     return int(_x(i) == 5 and _y(i) == 7)
 
@@ -189,6 +210,7 @@ FIXTURES = {
     "ps_w64_a_uniform_vote": ("A", _a_uniform_vote, {"VKH_SGPRS": "0,0,0,0,9"}),
 
     "ps_w64_a_discard": ("A", _a_discard, {}),
+    "ps_w64_a_sat_pk_hi": ("A", _a_sat_pk_hi, {}),
     "ps_w64_b_waterfall": ("B", _b_waterfall, {}),
     "ps_w64_b_readfirstlane": ("B", _b_readfirstlane, {"VKH_SGPRS": "0,0,0,0,123"}),
     "ps_w64_b_readlane_uniform": ("B", _b_readlane_uniform, {"VKH_SGPRS": "0,0,0,0,123"}),
@@ -202,6 +224,7 @@ FIXTURES = {
     "ps_w64_c_vote_else": ("C", _c_vote_else, {}),
     "ps_w64_c_scc_vote": ("C", _c_scc_vote, {}),
     "ps_w64_c_execz_sgpr": ("C", _c_execz_sgpr, {}),
+    "ps_w64_c_sat_pk_hi": ("C", _c_sat_pk_hi, {}),
     "vs_w64_a_skip": ("A", _vs_a_skip, VS_ENV),
     "vs_w64_b_waterfall": ("B", _b_waterfall, VS_ENV),
     "vs_w64_b_readlane_uniform": ("B", _vs_b_readlane_uniform, dict(VS_ENV, VKH_SGPRS=VS_ENV["VKH_SGPRS"] + ",123")),
