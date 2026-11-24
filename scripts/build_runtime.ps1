@@ -35,6 +35,11 @@ function Find-BuildTool([string]$Preferred, [string]$CommandName, [scriptblock]$
 }
 
 $root = Split-Path $PSScriptRoot -Parent
+# A % in the checkout path cannot build: cmd.exe expands %...% in _build.cmd, and cl.exe rejects a % in the
+# path-valued /D definitions of the test targets (D8038) however it is quoted. Say so before anything starts.
+if ($root.Contains('%')) {
+    throw "The checkout path '$root' contains '%', and the runtime can't be built from there (cmd.exe and cl.exe treat % specially). Move or clone the checkout to a folder without % in its path (docs/testing.md, Known problems)."
+}
 $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer"
 $vs = & "$installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 if (-not $vs) { throw "Visual Studio with the C++ x64 tools wasn't found." }

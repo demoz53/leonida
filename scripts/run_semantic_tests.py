@@ -4,6 +4,7 @@ r"""Run the translator regression suite (tests/semantic) one process per test fi
     python -I scripts/run_semantic_tests.py tests/semantic -p 'test_image_*.py'  # a matching subset
     python -I scripts/run_semantic_tests.py tests/semantic -j 4     # four at a time
     python -I scripts/run_semantic_tests.py tests/semantic -v       # also print the output of the files that pass
+    python -I scripts/run_semantic_tests.py tests/semantic --timeout 300  # optional subprocess time limit
 
 `-p` / `--pattern` selects test filenames using unittest discover's glob syntax (default `test*.py`). Quote the
 pattern so the shell does not expand it. Only Python module filenames are selected, including inside packages;
@@ -14,15 +15,24 @@ It runs the files `python -m unittest discover -s tests/semantic` finds (`test*.
 run side by side because each one writes only into its own temporary folder; a new test must do the same. With -j 1,
 or on a single core, it runs that discover command itself. Prints the output of every failing file and one summary
 line, and exits 1 if a file fails or none is found. Standard library only.
+
+`--timeout SECONDS` limits each module subprocess in parallel mode, or the entire discover subprocess with
+`-j 1`. The value must be positive and at most 86400 seconds (24 hours), keeping it within platform wait limits.
+A timeout fails the run and reports any output already produced; other parallel modules keep running.
+The default has no time limit. This stops the direct test subprocess, not any descendants it may have started.
 """
 import argparse
 import concurrent.futures
 import fnmatch
+import locale
+import math
 import os
 import re
 import subprocess
 import sys
 import time
+
+MAX_TIMEOUT_SECONDS = 24 * 60 * 60
 
 
 def test_modules(directory, pattern="test*.py"):
@@ -37,11 +47,25 @@ def test_modules(directory, pattern="test*.py"):
     return names
 
 
-def run_module(directory, module, verbose):
+def positive_seconds(value):
+    seconds = float(value)
+    if not math.isfinite(seconds) or not 0 < seconds <= MAX_TIMEOUT_SECONDS:
+        raise argparse.ArgumentTypeError(
+            f"timeout must be a positive finite number of seconds no greater than {MAX_TIMEOUT_SECONDS} (24 hours)")
+    return seconds
+
+
+def run_module(directory, module, verbose, timeout=None):
     """(return code, tests run, output) of `python -m unittest <module>` run from `directory`."""
     cmd = [sys.executable, "-m", "unittest", *(["-v"] if verbose else []), module]
-    p = subprocess.run(cmd, cwd=directory, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                       errors="replace")
+    try:
+        p = subprocess.run(cmd, cwd=directory, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                           errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        out = exc.stdout or ""
+        if isinstance(out, bytes):  # TimeoutExpired retains bytes even when text=True.
+            out = out.decode(locale.getpreferredencoding(False), errors="replace")
+        return 1, 0, out + f"\nTIMED OUT after {timeout:g} s: {module}\n"
     ran = re.search(r"^Ran (\d+) tests? in", p.stdout, re.M)
     return p.returncode, int(ran.group(1)) if ran else 0, p.stdout
 
@@ -52,6 +76,9 @@ def main(argv=None):
     ap.add_argument("-p", "--pattern", default="test*.py", help="test filename glob (default: test*.py)")
     ap.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 1, help="files at a time (default: cores)")
     ap.add_argument("-v", "--verbose", action="store_true", help="unittest -v, and print passing files' output")
+    ap.add_argument("--timeout", type=positive_seconds, default=None, metavar="SECONDS",
+                    help=f"positive finite time limit up to {MAX_TIMEOUT_SECONDS} seconds (24 hours) per module "
+                         "subprocess, or for the whole discover subprocess with -j 1 (default: no limit)")
     a = ap.parse_args(argv)
     directory = os.path.abspath(a.directory)
     modules = test_modules(directory, a.pattern)
@@ -59,13 +86,18 @@ def main(argv=None):
         print(f"no {a.pattern} files in {directory}")
         return 1
     if a.jobs <= 1:
-        return subprocess.call([sys.executable, "-m", "unittest", "discover", "-s", directory,
-                                "-p", a.pattern, *(["-v"] if a.verbose else [])])
+        try:
+            return subprocess.call([sys.executable, "-m", "unittest", "discover", "-s", directory,
+                                    "-p", a.pattern, *(["-v"] if a.verbose else [])], timeout=a.timeout)
+        except subprocess.TimeoutExpired:
+            # Inherited stdout/stderr have already emitted any partial test output.
+            print(f"TIMED OUT after {a.timeout:g} s: unittest discover in {directory}", file=sys.stderr)
+            return 1
     # Largest files first: they tend to run longest, and one started last would set the wall time alone.
     modules.sort(key=lambda m: -os.path.getsize(os.path.join(directory, *m.split(".")) + ".py"))
     start, total, failed = time.monotonic(), 0, []
     with concurrent.futures.ThreadPoolExecutor(a.jobs) as pool:
-        jobs = {pool.submit(run_module, directory, m, a.verbose): m for m in modules}
+        jobs = {pool.submit(run_module, directory, m, a.verbose, a.timeout): m for m in modules}
         for job in concurrent.futures.as_completed(jobs):
             code, ran, out = job.result()
             total += ran
