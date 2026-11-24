@@ -1271,6 +1271,11 @@ public:
         replay_.zero_size = size;
     }
 
+    void set_depth_range_unrestricted(bool enabled) {
+        std::unique_lock lock(resource_mutex_);
+        replay_.depth_range_unrestricted = enabled;
+    }
+
     // Physical-device COLOR_ATTACHMENT format check for reinterpreted UAV clears.
     void set_color_attachment_format(std::function<bool(VkFormat)> check) {
         std::unique_lock lock(resource_mutex_);
