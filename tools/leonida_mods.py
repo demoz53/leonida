@@ -36,7 +36,15 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from types import SimpleNamespace
 
+# -I keeps the script directory off sys.path, so add it explicitly before importing the sibling module.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from manifest_verifier import ManifestError, check_files, sha256_file  # noqa: E402
+
 EXPECTED_EXE = "game_scarlett_master.exe"
+# The per-version size + SHA-256 manifests make_game checks the package against.
+VERSIONS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "game")
+# In the port folder: files that already passed check_launch_files, by size, times and file id.
+LAUNCH_CACHE = "verified_files.json"
 MANIFEST = "mod.json"
 WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
                     *(f"LPT{i}" for i in range(1, 10))}
@@ -498,8 +506,7 @@ def runtime_executable(port: str) -> str:
     raise ModsError(f"{port} has no gta6rt executable; build the runtime stage first")
 
 
-def runtime_command(args: argparse.Namespace, mods_dir: str) -> list[str]:
-    port = port_for(args)
+def game_for(args: argparse.Namespace, port: str) -> str:
     game = os.path.abspath(args.game) if args.game else None
     if game is None:
         game_path = os.path.join(port, "game_path.txt")
@@ -510,6 +517,63 @@ def runtime_command(args: argparse.Namespace, mods_dir: str) -> list[str]:
             raise ModsError(f"no --game given and {game_path} is unreadable: {exc}") from exc
         if not game:
             raise ModsError(f"{game_path} is empty; pass --game")
+    return game
+
+
+def version_for(game: str) -> dict | None:
+    """The game/xbox-*.json manifest whose MicrosoftGame.Config (a small file) matches the copy's, or None."""
+    config = os.path.join(game, "MicrosoftGame.Config")
+    try:
+        size = os.path.getsize(config)
+    except OSError:
+        return None
+    digest = None
+    for name in sorted(os.listdir(VERSIONS)):
+        if not name.endswith(".json"):
+            continue
+        with open(os.path.join(VERSIONS, name), encoding="utf-8") as f:
+            version = json.load(f)
+        info = version.get("files", {}).get("MicrosoftGame.Config")
+        if not info or info["size"] != size:
+            continue
+        if digest is None:
+            try:
+                digest = sha256_file(config)
+            except OSError:
+                return None
+        if digest == info["sha256"]:
+            return version
+    return None
+
+
+def check_launch_files(args: argparse.Namespace) -> None:
+    """Before gta6rt maps them, the package DLLs it loads from the game folder, and the executable unless --image
+    names a stand-in, must match the version manifest: size first, then SHA-256. Mods don't touch either (they are
+    archetype swaps the runtime reads from mods/), so a mismatch is a damaged or swapped file, not a mod."""
+    port = port_for(args)
+    game = game_for(args, port)
+    version = version_for(game)
+    if version is None:
+        if args.image:
+            return
+        raise ModsError(f"{game}: no version manifest in game/ matches its MicrosoftGame.Config, so "
+                        f"{EXPECTED_EXE} and its DLLs can't be checked; pass --image to run a stand-in executable")
+    files = [(os.path.join(game, rel), info["size"], info["sha256"]) for rel, info in version["files"].items()
+             if rel.lower().endswith(".dll") and os.path.isfile(os.path.join(game, rel))]
+    if not args.image:
+        exe = version.get("expected_exe", EXPECTED_EXE)
+        if "expected_exe_sha256" in version:
+            files.append((os.path.join(game, exe), version["expected_exe_size"], version["expected_exe_sha256"]))
+    try:
+        check_files(files, os.path.join(port, LAUNCH_CACHE))
+    except ManifestError as exc:
+        raise ModsError(f"not starting gta6rt: {exc} (use an unmodified copy of version "
+                        f"{version['version']})") from exc
+
+
+def runtime_command(args: argparse.Namespace, mods_dir: str) -> list[str]:
+    port = port_for(args)
+    game = game_for(args, port)
     image = os.path.abspath(args.image) if args.image else os.path.join(game, EXPECTED_EXE)
     if not os.path.isfile(image):
         raise ModsError(f"{image} is not present; pass --image for a stand-in executable")
@@ -923,6 +987,7 @@ def run_gui(args: argparse.Namespace, initial_mods_dir: str | None) -> int:
             if print_only:
                 self.log(shlex.join(command))
                 return
+            check_launch_files(command_args)
             flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
             process = subprocess.Popen(command, cwd=port, creationflags=flags)
             self.log(f"started {mode} as process {process.pid}: {shlex.join(command)}")
@@ -994,7 +1059,8 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--dry-run", action="store_true", help="map the image without running game code")
     mode.add_argument("--init", action="store_true", help="run module initialisation but not the entry point")
     run.add_argument("--game", help="game package folder (default: game_path.txt)")
-    run.add_argument("--image", help=f"image to load (default: <game>/{EXPECTED_EXE})")
+    run.add_argument("--image", help=f"image to load (default: <game>/{EXPECTED_EXE}, checked against the "
+                                     "version manifest first; a stand-in given here is not)")
     run.add_argument("--archetype-lookup", metavar="RVA[,ARG]",
                      help="hook the measured archetype lookup for this executable")
     run.add_argument("--trace-d3d12", action="store_true", help="log D3D12 calls")
@@ -1055,6 +1121,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.print_command:
                 print(shlex.join(command))
             else:
+                check_launch_files(args)
                 return subprocess.call(command)
         else:
             raise ModsError(f"unknown command {args.command}")

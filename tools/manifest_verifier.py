@@ -168,6 +168,56 @@ def save_cache(path: str, entries: dict[str, dict]) -> None:
         raise
 
 
+def _stable_stamp(path: str, before: list[int]) -> Optional[list[int]]:
+    """The stamp to cache for a file that just hashed OK, or None. only save it if the stamp didn't move while
+    hashing and it wasn't written super recently, otherwise a sneaky write could hide behind the cache"""
+    try:
+        after = _cache_stamp(path, os.stat(path))
+    except OSError:
+        return None
+    return after if after == before and time.time_ns() - after[1] > RACY_WINDOW_NS else None
+
+
+def check_files(files: list[tuple[str, int, str]], cache_path: Optional[str] = None) -> None:
+    """Checks each (path, size, sha256): the size first, then the streamed SHA-256. the first file that differs
+    raises ManifestError, one line with the file and expected vs actual. cache_path works like --cache: a file whose
+    size, times and id match an entry that passed isn't read again, and a cache that can't be written is skipped."""
+    cache = load_cache(cache_path) if cache_path is not None else {}
+    passed = 0
+    try:
+        for path, size, expected in files:
+            expected = expected.lower()
+            try:
+                st = os.stat(path)
+            except OSError as err:
+                raise ManifestError(f"{path}: cannot read it ({err.strerror or err})") from None
+            if st.st_size != size:
+                raise ManifestError(f"{path}: size is {st.st_size} bytes, expected {size}")
+            if cache_path is not None:
+                stamp = _cache_stamp(path, st)
+                key = _cache_key(path)
+                hit = cache.get(key)
+                if hit is not None and hit["stamp"] == stamp and hit["sha256"] == expected:
+                    continue
+            try:
+                actual = sha256_file(path, expected_size=size)
+            except OSError as err:
+                raise ManifestError(f"{path}: cannot hash it ({err})") from None
+            if actual != expected:
+                raise ManifestError(f"{path}: SHA-256 is {actual}, expected {expected}")
+            if cache_path is not None:
+                after = _stable_stamp(path, stamp)
+                if after is not None:
+                    cache[key] = {"stamp": after, "sha256": expected}
+                    passed += 1
+    finally:
+        if passed:
+            try:
+                save_cache(cache_path, cache)
+            except OSError:
+                pass
+
+
 def walk(target_dir: str, *, exclude: str | tuple[str, ...] | None = None):
     """Yields (relative_path, absolute_path) using forward slashes, excluding the selected manifest (and cache)."""
     def scan_failed(error: OSError) -> None:
@@ -416,13 +466,8 @@ def verify_manifest(
         except OSError as err:
             return rel, size, "UNREADABLE", str(err)
         if cache_path is not None:
-            # only save it if the stamp didn't move while hashing and it wasn't written super recently,
-            # otherwise a sneaky write could hide behind the cache
-            try:
-                after = _cache_stamp(abs_p, os.stat(abs_p))
-            except OSError:
-                after = None
-            if after == stamps[rel] and time.time_ns() - after[1] > RACY_WINDOW_NS:
+            after = _stable_stamp(abs_p, stamps[rel])
+            if after is not None:
                 kept[_cache_key(abs_p)] = {"stamp": after, "sha256": expected_hash}
         return rel, size, "OK", None
 

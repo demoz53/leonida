@@ -62,7 +62,11 @@ python -I tools/leonida_mods.py --port "D:\Games\Leonida" run --archetype-lookup
 ```
 
 Without the measured `--archetype-lookup` RVA the runtime still loads and reports the manifests but the swaps are
-not applied, as above. The game executable itself is still needed; the manager does not supply it.
+not applied, as above. The game executable itself is still needed; the manager does not supply it. Before starting
+`gta6rt`, `run` (and the window's launch buttons) check the package DLLs and the executable against the version
+manifest in `game/`, size first, then SHA-256, and refuse a file that differs; mods never change either. Files that
+passed are remembered in `verified_files.json` in the port folder. An executable named with `--image` is taken as a
+stand-in and not checked; the DLLs still are.
 
 The repository's `mods/` folder has four manifest-only examples. `mandy_prison_intro` is enabled; the other three
 are installed disabled so a copied folder cannot surprise anyone or silently fight it:

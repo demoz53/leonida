@@ -3,13 +3,16 @@
     python -I tests/test_leonida_mods.py -v
 """
 import contextlib
+import hashlib
 import io
 import json
 import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
+from unittest import mock
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -166,6 +169,82 @@ class ManagerTests(unittest.TestCase):
             self.assertIn(os.path.join(str(port), "mods"), out)
             self.assertIn("--archetype-lookup 1A2B3C0", out)
             self.assertTrue(out.rstrip().endswith("--windowed"))
+
+
+class LaunchCheckTests(unittest.TestCase):
+    """`run` checks the package DLLs and the executable against a synthetic version manifest before starting."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.port, self.game, versions = (Path(tmp.name, n) for n in ("port", "game", "versions"))
+        for folder in (self.port, self.game, versions):
+            folder.mkdir()
+        launcher = "gta6rt.exe" if os.name == "nt" else "gta6rt.sh"
+        self.port.joinpath(launcher).write_bytes(b"MZ" if os.name == "nt" else b"#!/bin/sh\n")
+        self.port.joinpath("game_path.txt").write_text(str(self.game) + "\n", encoding="utf-8")
+        self.data = {"MicrosoftGame.Config": b"<Game/>", "Fake.dll": b"MZ fake dll", "big.rpf": b"not checked"}
+        for name, data in self.data.items():
+            self.game.joinpath(name).write_bytes(data)
+        self.exe = b"MZ fake exe"
+        self.game.joinpath(leonida_mods.EXPECTED_EXE).write_bytes(self.exe)
+        write_json(versions / "xbox-9.9.json", {
+            "title": "synthetic", "version": "9.9",
+            "files": {n: {"size": len(d), "sha256": hashlib.sha256(d).hexdigest()} for n, d in self.data.items()},
+            "expected_exe": leonida_mods.EXPECTED_EXE, "expected_exe_size": len(self.exe),
+            "expected_exe_sha256": hashlib.sha256(self.exe).hexdigest()})
+        for path in self.game.iterdir():
+            os.utime(path, (time.time() - 60,) * 2)  # older than the cache's racy window
+        patcher = mock.patch.object(leonida_mods, "VERSIONS", str(versions))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def run_cli(self, *extra):
+        with mock.patch.object(leonida_mods.subprocess, "call", return_value=0) as call:
+            code, _, err = cli("--port", str(self.port), "run", "--dry-run", *extra)
+        return code, err, call.called
+
+    def test_matching_files_start_and_are_cached(self):
+        self.assertEqual(self.run_cli("--image", str(self.game / leonida_mods.EXPECTED_EXE)), (0, "", True))
+        self.assertEqual(self.run_cli(), (0, "", True))
+        self.assertTrue(self.port.joinpath(leonida_mods.LAUNCH_CACHE).is_file())
+        with mock.patch.object(sys.modules["manifest_verifier"], "sha256_file",
+                               side_effect=AssertionError("hashed again")):
+            self.assertEqual(self.run_cli(), (0, "", True))
+
+    def test_changed_dll_refuses_to_start(self):
+        self.game.joinpath("Fake.dll").write_bytes(b"MZ fake dlX")
+        code, err, started = self.run_cli()
+        self.assertEqual((code, started), (2, False))
+        self.assertIn("Fake.dll: SHA-256 is ", err)
+        self.assertIn(", expected " + hashlib.sha256(self.data["Fake.dll"]).hexdigest(), err)
+        self.assertEqual(len(err.strip().splitlines()), 1)
+
+    def test_changed_exe_refuses_unless_a_stand_in_image_is_named(self):
+        self.game.joinpath(leonida_mods.EXPECTED_EXE).write_bytes(self.exe + b"!")
+        code, err, started = self.run_cli()
+        self.assertEqual((code, started), (2, False))
+        self.assertIn(f"{leonida_mods.EXPECTED_EXE}: size is {len(self.exe) + 1} bytes, expected {len(self.exe)}",
+                      err)
+        stand_in = self.port / "stand_in.exe"
+        stand_in.write_bytes(b"MZ")
+        self.assertEqual(self.run_cli("--image", str(stand_in)), (0, "", True))
+        self.game.joinpath("Fake.dll").write_bytes(b"MZ")  # the DLLs still load from the game folder
+        code, err, started = self.run_cli("--image", str(stand_in))
+        self.assertEqual((code, started), (2, False))
+        self.assertIn("Fake.dll: size is 2 bytes", err)
+
+    def test_unknown_version_needs_a_stand_in_image(self):
+        self.game.joinpath("MicrosoftGame.Config").write_bytes(b"<Other/>")
+        code, err, started = self.run_cli()
+        self.assertEqual((code, started), (2, False))
+        self.assertIn("no version manifest", err)
+        self.assertEqual(self.run_cli("--image", str(self.game / leonida_mods.EXPECTED_EXE)), (0, "", True))
+
+    def test_print_reads_nothing(self):
+        self.game.joinpath("Fake.dll").write_bytes(b"MZ")
+        with mock.patch.object(leonida_mods, "check_files", side_effect=AssertionError("checked")):
+            self.assertEqual(self.run_cli("--print")[:2], (0, ""))
 
 
 class SamplesAndGuiTests(unittest.TestCase):

@@ -435,5 +435,7 @@
    "sha256": "0fa110ecac0a5fac8294921132cc8322440bdf93e74e723eb63eae0143d58e58"
   }
  },
- "expected_exe": "game_scarlett_master.exe"
+ "expected_exe": "game_scarlett_master.exe",
+ "expected_exe_size": 120181760,
+ "expected_exe_sha256": "e95020b2fa4a721db3df59fdecf75621730ac559d8835252f6c3b658d5a08993"
 }

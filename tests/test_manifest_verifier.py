@@ -1084,6 +1084,28 @@ class TestVerifyCache(unittest.TestCase):
             self.assertNotIn(b"\r\n", f.read())
 
 
+    def entries(self) -> list[tuple[str, int, str]]:
+        return [(os.path.join(self.game, r), len(d), hashlib.sha256(d).hexdigest().upper())
+                for r, d in self.data.items()]
+
+    def test_check_files_size_then_hash_then_cache(self) -> None:
+        mv.check_files(self.entries(), self.cache)
+        self.assertEqual(self.cached_names(), {"a.bin", "b.bin"})
+        with patch.object(mv, "sha256_file", side_effect=AssertionError("hashed again")):
+            mv.check_files(self.entries(), self.cache)
+        path = os.path.join(self.game, "a.bin")
+        with patch.object(mv, "sha256_file", side_effect=AssertionError("hashed for a size mismatch")):
+            with self.assertRaisesRegex(mv.ManifestError, r"a\.bin: size is 4096 bytes, expected 4095$"):
+                mv.check_files([(path, 4095, "0" * 64)], self.cache)
+        self.write("a.bin", b"x" * 4096)  # same size, new bytes and stamp: the cache entry no longer applies
+        actual = hashlib.sha256(b"x" * 4096).hexdigest()
+        expected = hashlib.sha256(self.data["a.bin"]).hexdigest()
+        with self.assertRaisesRegex(mv.ManifestError, rf"a\.bin: SHA-256 is {actual}, expected {expected}$"):
+            mv.check_files(self.entries(), self.cache)
+        with self.assertRaisesRegex(mv.ManifestError, r"missing\.dll: cannot read it"):
+            mv.check_files([(os.path.join(self.game, "missing.dll"), 1, "0" * 64)])
+
+
 class TestSaveVerifyCache(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
