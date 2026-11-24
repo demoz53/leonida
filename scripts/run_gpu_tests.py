@@ -93,21 +93,39 @@ def make_ms_psv0(threads_x: int, maxv: int, maxp: int, topology: int = 2, group_
     return struct.pack("<I", len(r)) + bytes(r)
 
 
-def assemble_to_s(llvm_mc: str, asm_path: str, s_path: str, name: str) -> None:
-    """Assemble raw RDNA2 .asm with llvm-mc -show-encoding into .s format for rdna2spirv.py."""
-    with open(asm_path, encoding="utf-8") as source:
-        raw = source.read()
-    cmd = mc_command.mc_command(llvm_mc) + ["-triple=amdgcn--amdpal", "-mcpu=gfx1013"]
+# cs_global_csub.asm: out[0..7], the packed results derived in its header (old value and M after each case, the
+# contention on one dword).
+CSUB_WORDS = [0x10070905, 0x0D070000, 0x00630064, 0x80000000, 0x00000000, 0xFFFFFFFE, 0x000C0500, 0x01D800D2]
+
+
+def asm_target(raw: str) -> tuple[str, str | None]:
+    """The llvm-mc -mcpu and -mattr of a fixture: "; mcpu: <cpu>" and "; mattr: <features>" in its leading comment
+    lines (gfx1013 and none when absent)."""
+    mcpu, mattr = "gfx1013", None
     for ln in raw.splitlines():
         s = ln.strip()
         if not s:
             continue
         if not s.startswith(";"):
             break
-        m = re.match(r";\s*mattr:\s*(\S+)", s)
-        if m:
-            cmd.append(f"-mattr={m.group(1)}")
-            break
+        m = re.match(r";\s*(mcpu|mattr):\s*(\S+)", s)
+        if m and m.group(1) == "mcpu":
+            mcpu = m.group(2)
+        elif m and mattr is None:
+            mattr = m.group(2)
+    return mcpu, mattr
+
+
+def assemble_to_s(llvm_mc: str, asm_path: str, s_path: str, name: str) -> None:
+    """Assemble raw RDNA2 .asm with llvm-mc -show-encoding into .s format for rdna2spirv.py."""
+    with open(asm_path, encoding="utf-8") as source:
+        raw = source.read()
+    # The fixtures are written for gfx1013; "; mcpu: gfx1030" in the leading comment assembles one for another target
+    # (GFX10.3-only instructions such as global_atomic_csub, which gfx1013 rejects).
+    mcpu, mattr = asm_target(raw)
+    cmd = mc_command.mc_command(llvm_mc) + ["-triple=amdgcn--amdpal", f"-mcpu={mcpu}"]
+    if mattr:
+        cmd.append(f"-mattr={mattr}")
     if name in CLIP_CASES:
         cmd.append(f"-defsym=PARAM_SLOT={CLIP_CASES[name]}")
     cmd.append("-show-encoding")
@@ -120,7 +138,7 @@ def assemble_to_s(llvm_mc: str, asm_path: str, s_path: str, name: str) -> None:
     )
     if p.returncode != 0:
         raise RuntimeError(f"llvm-mc failed on {name}:\n{p.stderr}")
-    lines = [f"; {name}  code 0x0..0x0 (synthetic), gfx1013, 0 invalid words"]
+    lines = [f"; {name}  code 0x0..0x0 (synthetic), {mcpu}, 0 invalid words"]
     for ln in p.stdout.splitlines():
         if ln.startswith("\t.") or ln.strip().startswith("."):
             continue
@@ -1062,14 +1080,16 @@ def run_suite(a, work: str) -> int:
             # d16_xyz / d16_xy typed-buffer loads and d16_xyz stores (cs_fmt_d16_xyz.asm header)
             problem = fmt_d16_xyz_test(a.build, spirv_dir, cs_env)
             results.append((name, not problem, problem or "80/80 dumped words exact"))
-        elif name in ("cs_global_neg_offset", "cs_global_mem_ext"):
+        elif name in ("cs_global_neg_offset", "cs_global_mem_ext", "cs_global_csub"):
             # Negative global_load/global_store offsets (cs_global_neg_offset.asm): 40 groups give a 0x2800-byte
             # heap holding both the right addresses and the 4096-lower ones. One thread, no wave64 requirement.
             # cs_global_mem_ext.asm: global/buffer atomics, 8/16-bit global stores and d16 loads in the same heap.
             rc, msg = run_cmd([vk_compute, spv, "40", "dump"], env=cs_env)
             want = {"cs_global_neg_offset": [0x5EED1FFC, 0x8BAD1800, 0x5EED1FF0, 0x5EED1FF4, 0x9E, 0xFFFF8BAD,
                                              0x57023FFC, 0xEEEEEEEE],
-                    "cs_global_mem_ext": [0x5, 0xC, 0x977, 0xFFF00000, 0xEDCB5678, 0xEF332211, 0x887766BE, 0xFF801234]}[name]
+                    "cs_global_mem_ext": [0x5, 0xC, 0x977, 0xFFF00000, 0xEDCB5678, 0xEF332211, 0x887766BE, 0xFF801234],
+                    # cs_global_csub.asm: global/buffer_atomic_csub, the clamp at 0, glc, and 32 lanes on one dword
+                    "cs_global_csub": CSUB_WORDS}[name]
             ok, detail = judge_cs_dump(rc, msg, want, wave64=False, partial=False, emulated=False, hexwords=True)
             results.append((name, ok, detail))
         elif name == "cs_heap_init":
@@ -1152,7 +1172,7 @@ def run_suite(a, work: str) -> int:
             # Whole-wave mask test, as in check.py: needs a 64-wide subgroup, skipped where the device has none.
             # With LEONIDA_W64_EMULATE=1 it was translated with --wave64-emulate and runs on any subgroup size.
             results.append((name,) + wavemask_check(vk_compute, spv, cs_env, w64_emulated()))
-        elif name in ("cs_store", "cs_signed_zero_nan", "cs_smem_soffset_imm", "cs_w32_lane_wrap", "cs_movrelsd_2", "cs_w32_permute", "cs_w32_sincos", "cs_w32_buffer_sub16", "cs_w32_buffer_store_sub", "cs_w32_fcmpswap", "cs_w32_permlane_fi", "cs_exec_const", "cs_w32_mask_imm", "cs_w64_mask_imm", "cs_w32_lds_u8_d16", "cs_w32_lds_subdword", "cs_w32_lds_wide", "cs_w32_int_ext", "cs_w32_salu64", "cs_w32_misc_ext", "cs_w32_new_ops", "cs_wave64_ballot", "cs_wm_half_ops", "cs_wm_half_cmp", "cs_wm_bfm64", "cs_wm_scc_rfl", "cs_wqm_w64", "cs_wqm_w32", "cs_wqm_w64_half",
+        elif name in ("cs_store", "cs_signed_zero_nan", "cs_smem_soffset_imm", "cs_w32_lane_wrap", "cs_movrelsd_2", "cs_w32_permute", "cs_w32_sincos", "cs_w32_buffer_sub16", "cs_w32_buffer_store_sub", "cs_w32_fcmpswap", "cs_w32_csub_ext", "cs_w32_permlane_fi", "cs_exec_const", "cs_w32_mask_imm", "cs_w64_mask_imm", "cs_w32_lds_u8_d16", "cs_w32_lds_subdword", "cs_w32_lds_wide", "cs_w32_int_ext", "cs_w32_salu64", "cs_w32_misc_ext", "cs_w32_new_ops", "cs_wave64_ballot", "cs_wm_half_ops", "cs_wm_half_cmp", "cs_wm_bfm64", "cs_wm_scc_rfl", "cs_wqm_w64", "cs_wqm_w32", "cs_wqm_w64_half",
                       "cs_dpp", "cs_dpp_row", "cs_dpp_mask", "cs_dpp8", "cs_dpp_ops", "cs_dpp_bank", "cs_dpp_fi",
                       "cs_dpp_bound", "cs_dpp_w64",
                       "cs_w64_mask_detect",
@@ -1185,6 +1205,9 @@ def run_suite(a, work: str) -> int:
                 "cs_w32_buffer_sub16": [0xBEEF00AA, 0x00AA1234, 0xBEEFFFAA, 0xFFAA1234, 0xBEEF8899, 0x88991234, 0x1122CD44, 0xABCD7788],
                 # ds_cmpst_f32 and buffer_atomic_fcmpswap: float compare (cs_w32_fcmpswap.asm)
                 "cs_w32_fcmpswap": [0, 0x3F800000, 0x7FC00000, 0x3F800000, 0x80000000, 0x40400000, 0x3F800000, 0x7FC00000],
+                # global/buffer_atomic_csub: inactive lanes on a trap word, buffer elements past the V# range
+                # (cs_w32_csub_ext.asm)
+                "cs_w32_csub_ext": [0xAAAAAAAA, 0x77770054, 0x023005C8, 0xAAAAAAAA, 0x55550012, 0x0019001E, 0x00990000, 0x00AB0003],
                 "cs_w32_new_ops": [0x55, 0x8001, 0xC0000000, 0x80014000, 0x4000FFFF, 0x77, 0x99, 0x1234],
                 "cs_w32_misc_ext": [0x0FFF0FFF, 0xE2C4A688, 0x0007FFFF, 0x7FFF8000, 0xFFFE0002, 0xFFFF0005, 0x509, 0xCAFEF00D],
                 "cs_w32_salu64": [0x1E6A2C48, 0x1234, 0xFFFFFFFF, 0x100, 47, 48, 0xFFFF8000, 0xFFFFFFFE],
@@ -1296,7 +1319,7 @@ def run_suite(a, work: str) -> int:
                                   "cs_w32_lds_u8_d16", "cs_w32_int_ext", "cs_w32_salu64", "cs_w32_misc_ext", "cs_w32_new_ops",
                                   "cs_w32_lds_subdword", "cs_w32_lds_wide",
                                   "cs_bpermute32", "cs_w32_partial_scmp", "cs_w32_partial_permute", "cs_w32_permlane_fi", "cs_w32_sincos", "cs_w32_buffer_sub16", "cs_w32_buffer_store_sub", "cs_w32_fcmpswap",
-                                  "cs_lds_b64_cmpst", "cs_lds_xchg64_ext", "cs_relidx_ext", "cs_lds_atomics_ext", "cs_exec_const", "cs_w32_mask_imm", "cs_mask_vgpr_exec", "cs_valu16_ext", "cs_vfloat_ext",
+                                  "cs_lds_b64_cmpst", "cs_lds_xchg64_ext", "cs_relidx_ext", "cs_lds_atomics_ext", "cs_exec_const", "cs_w32_mask_imm", "cs_mask_vgpr_exec", "cs_valu16_ext", "cs_vfloat_ext", "cs_w32_csub_ext",
                                   "cs_dpp", "cs_dpp_row", "cs_dpp_mask", "cs_dpp8",
                                   "cs_dpp_ops", "cs_dpp_bound", "cs_dpp_bank", "cs_dpp_fi", "cs_w32_andn2_exec",
                                   "cs_w32_exec_computed") and not emulated and not partial
