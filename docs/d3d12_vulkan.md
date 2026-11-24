@@ -1555,7 +1555,10 @@ The runtime allocates image keys from `0x100000000` (4 GiB) in 256-byte steps, a
 - Textures and default-heap buffers outside the arena prefer `DEVICE_LOCAL` and need no host access. When VRAM is
   full they still get memory, from the next type `memory_type_order` lists, which is system memory. The first one
   that does is logged once (`[rt] d3d12: a N-byte allocation did not fit in device-local memory ...`, D3D-299,
-  `leonida::spilled_to_host`), so a run on a 4 GB GPU shows that it spilled (#2375).
+  `leonida::spilled_to_host`), so a run on a 4 GB GPU shows that it spilled (#2375). To fit textures within 4 GB
+  or 6 GB VRAM budgets and avoid host spills, `LEONIDA_TEXTURE_MIP_DROP=N` (0..3, default 0, #6043) drops the top N
+  mip levels from pure sampled textures at creation time (saving ~75% VRAM for drop 1, ~93.75% for drop 2) while
+  preserving render targets, depth-stencil surfaces, and UAV attachments at full resolution.
 
 **Capacity.** The arena is sized by buffers, descriptor heaps and shader code, not by textures. The allocator
 tracks the high-water mark; start with a configurable capacity (for example 4 GiB for the loading/menu path) and

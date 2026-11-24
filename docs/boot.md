@@ -82,6 +82,9 @@ Useful switches:
   open is always traced as `file_open_failed` (path, error, caller) when `--trace` is on.
 * `LEONIDA_VK_VALIDATION=1` enables the Khronos validation layer with the Vulkan backend (startup overhead; it is a
   diagnostic).
+* `LEONIDA_TEXTURE_MIP_DROP=N` (0..3, default 0, #6043) drops the top N mip level(s) of pure sampled textures at
+  creation time to reduce VRAM consumption on low-VRAM GPUs (e.g. 6 GB or 4 GB cards). Dropping 1 mip halves width
+  and height, saving ~75% texture memory without altering render targets, depth-stencil surfaces, or UAVs.
 * `DISABLE_RTSS_LAYER=1` and `DISABLE_VULKAN_OBS_CAPTURE=1` when MSI Afterburner or OBS is installed; their
   implicit layers add swapchain usage that shows up as validation errors ([testing.md](testing.md), "Known
   problems").
