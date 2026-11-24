@@ -1319,6 +1319,9 @@ def run_suite(a, work: str) -> int:
         elif name == "cs_imgstore":
             rc, msg = run_cmd([vk_store, spv])
             results.append((name, *helper_result(rc, msg)))
+        elif name == "cs_imgstore_cube":   # GPU-CUBE-STORE: six-layer 2D-array views at bindings 11/12/13
+            rc, msg = run_cmd([vk_store, spv, "cube"])
+            results.append((name, *helper_result(rc, msg)))
         elif name in ("cs_imgload", "cs_imgload_tfe", "cs_imgload_d16", "cs_imgload_d16_tfe", "cs_sample_lz_int_d16"):
             rc, msg = run_cmd([vk_store, spv, "load" if name in ("cs_imgload", "cs_imgload_tfe") else "load-d16"])
             results.append((name, *helper_result(rc, msg)))
