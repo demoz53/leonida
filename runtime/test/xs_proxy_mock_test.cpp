@@ -1588,7 +1588,9 @@ int run_env_slots(bool valid, bool on_slot74 = false) {
         EXPECT(hr_of(raw(device, 81, 77, 0x1a, word(&count), 0)) == E_NOTIMPL && env.stats == 1);
         EXPECT(hr_of(raw(queue, 30, 1, 0, 0)) == S_OK && env.present == 1);
         EXPECT(hr_of(raw(queue, 33)) == S_OK && env.suspend == 1);
-        EXPECT(hr_of(raw(queue, 32)) == E_NOTIMPL && env.resume == 0);
+        // ResumeX is unrouted (its slot equals PresentX's): an unrouted slot past the PC table is refused. 34, not
+        // 32, which is #414's PresentX on integration.
+        EXPECT(hr_of(raw(queue, 34)) == E_NOTIMPL && env.resume == 0);
         EXPECT(xs::set_presentation_handler(device, nullptr));
         EXPECT(release(queue) == 0);
     } else {
@@ -2765,11 +2767,12 @@ int check_presentation_wiring() {
     UINT count = 3;
     EXPECT(hr_of(raw(device, 81, 77, 0x1a, word(&count), 0)) == S_FALSE && count == 0 && p.stats_calls == 1);
 
-    // Queue slot 30 routes to PresentX while attached. SuspendX and ResumeX have no default route, so 31/32 are refused
-    // and never reach the presenter (the env mode, run_env_slots, routes them).
+    // Queue slot 30 routes to PresentX while attached. SuspendX and ResumeX have no default route, so 31/34 are refused
+    // and never reach the presenter (the env mode, run_env_slots, routes them). Slot 32 is not used as the unrouted
+    // example: on integration it is the retail title's measured PresentX (#414), served by the device's own presenter.
     EXPECT(hr_of(raw(queue, 30, 1, 0x1000, 0x2000)) == S_OK && p.present_calls == 1 && p.last_planes == 1);
     EXPECT(hr_of(raw(queue, 31, 0)) == E_NOTIMPL && p.suspend_calls == 0);
-    EXPECT(hr_of(raw(queue, 32)) == E_NOTIMPL && p.resume_calls == 0);
+    EXPECT(hr_of(raw(queue, 34)) == E_NOTIMPL && p.resume_calls == 0);
 
     // Detaching restores default E_NOTIMPL refusal on beyond-PC queue slots.
     EXPECT(xs::set_presentation_handler(device, nullptr));
