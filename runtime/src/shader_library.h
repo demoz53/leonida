@@ -804,7 +804,38 @@ struct SignatureElement {
     std::uint32_t register_index = 0;
     std::uint32_t system_value = 0;  // 0: an ordinary input fed by the input layout
     std::string component_type;      // "float", "uint", "sint"
+    std::uint32_t mask = UINT32_MAX, rw_mask = UINT32_MAX;  // absent in some older indexes
 };
+
+// Compare the same ISG1 fields shader_meta.py recorded. Names in the chunk are offsets from its beginning.
+inline bool matches_isg1(const std::vector<SignatureElement>& inputs, std::span<const std::uint8_t> chunk) {
+    if (chunk.size() < 8 || inputs.empty()) return false;
+    const auto u32 = [&](std::size_t offset) {
+        std::uint32_t value;
+        std::memcpy(&value, chunk.data() + offset, sizeof(value));
+        return value;
+    };
+    const std::size_t count = u32(0), table = u32(4);
+    constexpr std::size_t stride = 32;
+    if (count != inputs.size() || table < 8 || table > chunk.size() || count > (chunk.size() - table) / stride)
+        return false;
+    const std::size_t strings = table + count * stride;
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto& input = inputs[i];
+        const std::size_t row = table + i * stride, name = u32(row + 4);
+        if (name < strings || name >= chunk.size() || input.semantic.empty() ||
+            input.semantic.size() >= chunk.size() - name || chunk[name + input.semantic.size()] != 0 ||
+            std::memcmp(chunk.data() + name, input.semantic.data(), input.semantic.size()) != 0)
+            return false;
+        const auto type = u32(row + 16);
+        const std::string_view types[] = {"", "uint", "sint", "float"};
+        if (type == 0 || type >= std::size(types) || input.component_type != types[type] ||
+            input.semantic_index != u32(row + 8) || input.system_value != u32(row + 12) ||
+            input.register_index != u32(row + 20) || input.mask != chunk[row + 24] || input.rw_mask != chunk[row + 25])
+            return false;
+    }
+    return true;
+}
 
 struct ShaderEntry {
     std::string name;
@@ -906,8 +937,20 @@ public:
         return all.empty() ? nullptr : all.front();
     }
 
-    std::vector<const ShaderEntry*> candidates(std::string_view stage, std::string_view fssm_sha256) const {
-        return lookup(entries_, stage, fssm_sha256);
+    // For a vertex program shared by several containers, use the signature from the PSO's bytecode when
+    // the index records a match. Keep the order among matching entries for the normal binding preference.
+    std::vector<const ShaderEntry*> candidates(std::string_view stage, std::string_view fssm_sha256,
+                                               std::span<const std::uint8_t> bytecode = {}) const {
+        auto all = lookup(entries_, stage, fssm_sha256);
+        if (stage != "vs" || all.size() < 2 || bytecode.empty()) return all;
+        const auto signature = dxbc_part(bytecode, "ISG1");
+        if (signature.empty()) return all;
+        std::vector<const ShaderEntry*> matches;
+        for (const auto* entry : all)
+            if (matches_isg1(entry->input_signature, signature)) matches.push_back(entry);
+        // An index without a complete matching signature still goes through the layout-based selection.
+        if (matches.empty()) return all;
+        return matches;
     }
 
     // The entries of an FSPX program, by the SHA-256 of its kind-6 bytes (fspx_code_sha256).
@@ -1039,6 +1082,10 @@ private:
                     element.semantic_index = u32(item.find("semantic_index"));
                     element.register_index = u32(item.find("register"));
                     element.system_value = u32(item.find("system_value"));
+                    if (auto* field = item.find("mask"); field && field->kind == Json::Kind::number)
+                        element.mask = u32(field);
+                    if (auto* field = item.find("rw_mask"); field && field->kind == Json::Kind::number)
+                        element.rw_mask = u32(field);
                     if (const Json* v = item.find("component_type"); v && v->kind == Json::Kind::string)
                         element.component_type = v->string;
                     e.input_signature.push_back(std::move(element));

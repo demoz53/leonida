@@ -676,6 +676,59 @@ int main() {
     CHECK(library.candidates("vs", tagged_hash).empty());
     CHECK(vs_all[1]->input_signature.size() == 1 && vs_all[1]->input_signature[0].semantic_index == 3 &&
           vs_all[1]->input_signature[0].register_index == 0);
+    // A single COLOR0 layout fits all of these VS entries. Only the source container identifies the register
+    // and component mask used for translation. The two matching entries retain their original index order.
+    {
+        const auto subdir = dir / "vs_aliases";
+        std::filesystem::create_directory(subdir);
+        std::ofstream index(subdir / "index.json");
+        index << "{";
+        auto add = [&](const char* name, int reg, int mask, bool last = false) {
+            index << "\"" << name << "\":{\"stage\":\"vs\",\"fssm_sha256\":\"" << hash
+                  << "\",\"input_signature\":[{\"semantic\":\"COLOR\",\"semantic_index\":0,\"system_value\":0,"
+                     "\"component_type\":\"float\",\"register\":" << reg << ",\"mask\":" << mask
+                  << ",\"rw_mask\":1}]}" << (last ? "}" : ",");
+        };
+        add("other_register", 0, 3);
+        add("other_mask", 1, 15);
+        add("matching_a", 1, 3);
+        add("matching_b", 1, 3, true);
+        index.close();
+        ShaderLibrary aliases;
+        CHECK(aliases.load(subdir));
+
+        const auto dxil = dxbc_part(shader, "DXIL");
+        std::vector<std::uint8_t> wrapped = {'D','X','B','C'};
+        wrapped.resize(24, 0);
+        constexpr std::uint32_t isg_size = 8 + 32 + 6;  // header, row, "COLOR" with terminator
+        put32(wrapped, 40 + 8 + isg_size + 8 + std::uint32_t(dxil.size()));
+        put32(wrapped, 2);
+        put32(wrapped, 40);
+        put32(wrapped, 40 + 8 + isg_size);
+        wrapped.insert(wrapped.end(), {'I','S','G','1'});
+        put32(wrapped, isg_size);
+        put32(wrapped, 1);  // one row, starting eight bytes into ISG1
+        put32(wrapped, 8);
+        const auto row = wrapped.size();
+        // stream, name offset, semantic index, system value, float type, register, packed masks, precision
+        for (std::uint32_t word : {0u, 40u, 0u, 0u, 3u, 1u, 0x0103u, 0u}) put32(wrapped, word);
+        wrapped.insert(wrapped.end(), {'C','O','L','O','R',0,'D','X','I','L'});
+        put32(wrapped, std::uint32_t(dxil.size()));
+        wrapped.insert(wrapped.end(), dxil.begin(), dxil.end());
+        const auto program_hash = sha256_hex(fssm_program(wrapped));
+        CHECK(program_hash == hash);
+        const auto exact = aliases.candidates("vs", program_hash, wrapped);
+        CHECK(exact.size() == 2 && exact[0]->name == "matching_a" && exact[1]->name == "matching_b");
+        const auto fallback = aliases.candidates("vs", hash);
+        CHECK(fallback.size() == 4 && fallback[0]->name == "other_register");
+        CHECK(aliases.candidates("vs", hash, shader) == fallback);  // DXIL without ISG1
+        CHECK(aliases.candidates("vs", hash, fssm) == fallback);    // bare program
+        wrapped[row + 24] = 2;  // well-formed, unrecognized mask
+        CHECK(aliases.candidates("vs", hash, wrapped) == fallback);
+        wrapped[row + 24] = 3;
+        wrapped[row + 4] = 250;  // name outside the chunk
+        CHECK(aliases.candidates("vs", hash, wrapped) == fallback);
+    }
     const ShaderEntry* ps = library.find("ps", hash);
     CHECK(ps && ps->outputs.size() == 2 && ps->outputs[1] == 2);
     CHECK(ps->inputs.size() == 4 && ps->inputs[0] == 0 && ps->inputs[3] == 29);

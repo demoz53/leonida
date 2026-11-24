@@ -3633,8 +3633,9 @@ public:
                                                 desc.RasterizerState.DepthBiasClamp};
         for (Stage& stage : stages) {
             if (!stage.code.pShaderBytecode || !stage.code.BytecodeLength) continue;  // no PS: depth only
-            stage.fssm = leonida::fssm_program(
-                {static_cast<const std::uint8_t*>(stage.code.pShaderBytecode), stage.code.BytecodeLength});
+            const std::span bytecode(static_cast<const std::uint8_t*>(stage.code.pShaderBytecode),
+                                     stage.code.BytecodeLength);
+            stage.fssm = leonida::fssm_program(bytecode);
             if (stage.fssm.empty()) {
                 log_once("shader bytecode holds no FSSM program; bytes", int(stage.code.BytecodeLength));
                 return E_INVALIDARG;
@@ -3643,7 +3644,7 @@ public:
             // Containers with the same program can differ in their input signature or bindings: a VS must have its
             // inputs fed by this input layout (else the layout check below reports it).
             const bool vertex = stage.bit == VK_SHADER_STAGE_VERTEX_BIT;
-            stage.entry = pick_entry(library->candidates(stage.name, hash), [&](const leonida::ShaderEntry& e) {
+            stage.entry = pick_entry(library->candidates(stage.name, hash, bytecode), [&](const leonida::ShaderEntry& e) {
                 return !vertex || layout_feeds(e, desc.InputLayout);
             });
             if (!stage.entry) {

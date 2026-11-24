@@ -2043,6 +2043,12 @@ build emits that hash for every translation; the runtime extracts the FSSM chunk
 way `tools/fssm_unpack.py` does. The current `spirv/index.json` is keyed by carve name, which the runtime may not
 have; add the content hash to the index.
 
+Several vertex shaders can share that payload and fit the same D3D input layout while assigning its semantics
+to different registers. When the supplied DXBC has an ISG1 chunk, the runtime first selects candidates whose
+recorded input signature matches the chunk, including the registers, component types and masks. The usual
+layout and binding preferences still apply within that group. Bare programs and older indexes with incomplete
+signatures retain the layout-based lookup.
+
 Pipeline creation:
 
 - `D3D12_GRAPHICS_PIPELINE_STATE_DESC` is supported today (`CreateGraphicsPipelineState`), as is the compute desc. The
