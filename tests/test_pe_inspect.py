@@ -499,6 +499,52 @@ class PeInspectTest(unittest.TestCase):
         with open(colliding_file, "r", encoding="utf-8") as f:
             self.assertEqual(f.read(), "original preserved text")
 
+    def test_cli_refuses_aliased_json_and_markdown_outputs(self):
+        out = os.path.join(self.dir, "reports_alias_pair")
+        os.makedirs(out, exist_ok=True)
+        json_path = os.path.join(out, "sample.dll.json")
+        md_path = os.path.join(out, "sample.dll.md")
+        with open(json_path, "w", encoding="utf-8") as f:
+            f.write("original preserved text")
+        try:
+            os.link(json_path, md_path)
+        except (OSError, NotImplementedError) as e:
+            self.skipTest(f"os.link unavailable: {e}")
+
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = pe_inspect.main([self.image, "--out", out])
+        self.assertEqual(rc, 1)
+        self.assertIn("refer to the same file", err.getvalue())
+        with open(json_path, "r", encoding="utf-8") as f:
+            self.assertEqual(f.read(), "original preserved text")
+
+    def test_cli_refuses_output_aliased_to_earlier_report(self):
+        out = os.path.join(self.dir, "reports_alias_prior")
+        os.makedirs(out, exist_ok=True)
+        second_dir = os.path.join(self.dir, "second_alias")
+        os.makedirs(second_dir, exist_ok=True)
+        second_image = os.path.join(second_dir, "sample.dll")
+        shutil.copyfile(self.image, second_image)
+        first_json = os.path.join(out, "sample.dll.json")
+        second_md = os.path.join(out, "sample.dll-2.md")
+        with open(first_json, "w", encoding="utf-8") as f:
+            f.write("placeholder")
+        try:
+            os.link(first_json, second_md)
+        except (OSError, NotImplementedError) as e:
+            self.skipTest(f"os.link unavailable: {e}")
+
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = pe_inspect.main([self.image, second_image, "--out", out])
+        self.assertEqual(rc, 1)
+        self.assertIn("would overwrite earlier report", err.getvalue())
+        with open(first_json, "r", encoding="utf-8") as f:
+            parsed = json.load(f)
+        self.assertEqual(parsed["file"], "sample.dll")
+        self.assertFalse(os.path.exists(os.path.join(out, "sample.dll-2.json")))
+
     def test_cli_refuses_existing_file_as_out_dir(self):
         file_out = os.path.join(self.dir, "some_file.txt")
         with open(file_out, "w", encoding="utf-8") as f:

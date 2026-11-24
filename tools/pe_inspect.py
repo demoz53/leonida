@@ -506,6 +506,7 @@ def main(argv: list[str] | None = None) -> int:
     rc = 0
     seen_paths: set[tuple[str, str]] = set()
     used_names: set[str] = set()
+    written_outputs: list[str] = []
     for img in a.image:
         search_dir = a.game_dir or os.path.dirname(os.path.abspath(img))
         key = (os.path.normcase(os.path.realpath(img)), os.path.normcase(os.path.abspath(search_dir)))
@@ -545,6 +546,23 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{img}: report {collision} would overwrite input file", file=sys.stderr)
             rc = 1
             continue
+        if same_output_path(json_path, md_path):
+            print(f"{img}: report {json_path} and {md_path} refer to the same file", file=sys.stderr)
+            rc = 1
+            continue
+        output_collision = None
+        for prior in written_outputs:
+            if same_output_path(prior, json_path):
+                output_collision = (json_path, prior)
+                break
+            if same_output_path(prior, md_path):
+                output_collision = (md_path, prior)
+                break
+        if output_collision:
+            print(f"{img}: report {output_collision[0]} would overwrite earlier report {output_collision[1]}",
+                  file=sys.stderr)
+            rc = 1
+            continue
         try:
             with open(json_path, "w", encoding="utf-8", newline="\n") as f:
                 json.dump(r, f, indent=1)
@@ -554,6 +572,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{img}: cannot write report ({e.strerror or e})", file=sys.stderr)
             rc = 1
             continue
+        written_outputs.extend((json_path, md_path))
         enc = [s["name"] for s in r["sections"] if s["looks_encrypted"]]
         shim = sum(len(i["functions"]) for i in r["imports"] if i["where"] == "shim")
         print(f"{r['file']:<40} {r['machine']:<7} subsys={r['subsystem']!s:<7} pdata={r['pdata_functions']:<7} "
