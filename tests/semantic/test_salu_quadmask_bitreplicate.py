@@ -155,6 +155,15 @@ class QuadmaskBitreplicateTests(unittest.TestCase):
                 self.assertEqual(run([f"s_mov_b32 s2, {lo:#x}", "s_bitreplicate_b64_b32 s[10:11], s2"])[:2],
                                  (bitreplicate(lo) & M32, bitreplicate(lo) >> 32))
 
+    def test_bitreplicate_constant_into_vcc(self):
+        # Lane L's VCC bit is source bit L // 2; the single invocation is lane 0, so source bit 0 decides.
+        for x, want in ((0x0F0F0F0F, 1), (0x33333332, 0), (0x1, 1), (0x2, 0)):
+            with self.subTest(x=hex(x)):
+                spv = translate([f"s_bitreplicate_b64_b32 vcc, {x:#x}",
+                                 "v_cndmask_b32_e64 v0, 0x40000000, 0x40000001, vcc",
+                                 "exp mrt0 v0, v0, v0, v0 done vm", "s_endpgm"])
+                self.assertEqual(si.run_fragment(spv)["%out_mrt0"][0], 0x40000000 + want)
+
     def test_lane_masks_rejected(self):
         for lines in (["v_cmp_gt_u32_e32 vcc, 5, v0", "s_quadmask_b64 s[10:11], vcc"],
                       ["s_quadmask_b32 s10, exec_lo"],

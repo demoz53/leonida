@@ -87,7 +87,19 @@ def probe(mcpu: str) -> None:
              f"{install_hint()}")
 
 
-def disasm(code: bytes, mcpu: str, backend: str = "llvm-mc", wave32: bool = True):
+def disasm(code: bytes, mcpu: str, backend: str = "llvm-mc", wave32: bool = True, compute: bool = False):
+    """`compute`: a pipeline-library or FSPX compute program. llvm-mc 21 does not decode SMEM loads whose SOFFSET is
+    SGPR_NULL (0x7D, e.g. s_load_dwordx8 ... 0xd60 with soffset null): it reports the first dword invalid, then reads
+    the second (0xFA......) as an 8-byte EXP and the rest of the listing goes out of step (gfx1013 and gfx1030 alike).
+    In 749 of the 2,684 library programs of 1.0.2.1 that refused 945 programs ('fall-through into undecodable
+    words'). tools/rdna2_decode.py decodes them; such a program takes its listing when it has fewer invalid words."""
+    if compute and backend != "python":
+        asm, bad, err = disasm(code, mcpu, backend=backend, wave32=wave32)
+        if bad:
+            py_asm, py_bad = rdna2_decode.disasm_bytes(code, mcpu=mcpu, wave32=wave32)
+            if py_bad < bad:
+                return py_asm, py_bad, ""
+        return asm, bad, err
     if backend == "python":
         asm, bad = rdna2_decode.disasm_bytes(code, mcpu=mcpu, wave32=wave32)
         return asm, bad, ""

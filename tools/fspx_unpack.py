@@ -47,10 +47,8 @@ KINDS = (0, 1, 6, 7)
 PROLOGUE_WORDS = (0, 3, 6)
 PROLOGUE_SIZE = 36
 # Some programs of the pipeline library in shaders.rpf carry only two of those words (0 and 3): a 24-byte prologue, with
-# the code starting at word 6 (50 of the 2,684 library programs of 1.0.2.1, docs/fspx.md). Read from word 0 they never
-# decode.
-SHORT_PROLOGUE_WORDS = (0, 3)
-SHORT_PROLOGUE_SIZE = 24
+# the code starting at word 6 (50 of the 2,684 library programs of 1.0.2.1, docs/fspx.md, #583). Read from word 0 they
+# never decode; code_range counts the hash words, two or three (#998).
 STAGE_COMPUTE = 5  # PSVRuntimeInfo1 ShaderStage (DirectX): 5 = compute
 
 
@@ -149,18 +147,30 @@ def code_range(code: bytes):
     """(start, end) of the instructions in a kind-6 program: after the 36- or 24-byte prologue when it is there, through
     the first s_endpgm. end is None when the program has no s_endpgm."""
     words = struct.unpack_from(f"<{len(code) // 4}I", code)
-    def vop3_180(ks):
-        return all(words[k] >> 16 == 0xD580 for k in ks)
-    if len(words) > 8 and vop3_180(PROLOGUE_WORDS):
-        start = PROLOGUE_SIZE
-    elif len(words) > 6 and vop3_180(SHORT_PROLOGUE_WORDS):
-        start = SHORT_PROLOGUE_SIZE
-    else:
-        start = 0
+    # Most programs carry three hash words; some pipeline-library programs of 1.0.2.1 carry two (a 24-byte prologue,
+    # then s_inst_prefetch), measured on the 50 programs the runtime found untranslated. Two or three count.
+    hash_words = 0
+    while hash_words < len(PROLOGUE_WORDS) and len(words) > PROLOGUE_WORDS[hash_words] + 2 and \
+            words[PROLOGUE_WORDS[hash_words]] >> 16 == 0xD580:
+        hash_words += 1
+    start = hash_words * PROLOGUE_SIZE // len(PROLOGUE_WORDS) if hash_words >= 2 and len(words) > 8 else 0
     pos = code.find(ENDPGM, start)
     while pos >= 0 and pos % 4:
         pos = code.find(ENDPGM, pos + 1)
     return start, (pos + 4 if pos >= 0 else None)
+
+
+def code_range_last(code: bytes):
+    """code_range through the last 4-byte-aligned s_endpgm instead of the first, as shader_library.code_range: a
+    program with an early exit branches to code after its first s_endpgm (28 of the 50 pipeline-library programs the
+    runtime dumped as untranslated: "branch target outside code")."""
+    start, first = code_range(code)
+    if first is None:
+        return start, None
+    last = code.rfind(ENDPGM)
+    while last >= first and (last - start) % 4:
+        last = code.rfind(ENDPGM, 0, last)
+    return start, max(first, last + 4)
 
 
 def psv_stage(container_parts: dict):
@@ -172,12 +182,49 @@ def psv_stage(container_parts: dict):
     return psv[4 + 24] if size > 24 and len(psv) > 4 + 24 else None
 
 
-def unpack_payload(payload: bytes):
+def branch_targets_inside(asm: str, size: int) -> bool:
+    """Whether every s_branch / s_cbranch_* of a shader_disasm.py listing lands inside [0, size)."""
+    pc = 0
+    for line in asm.splitlines():
+        if "; encoding: [" not in line:
+            continue
+        text, enc = line.split("; encoding: [", 1)
+        length = enc.count(",") + 1
+        parts = text.split()
+        if parts and (parts[0] == "s_branch" or parts[0].startswith("s_cbranch_")) and len(parts) > 1:
+            try:
+                k = int(parts[1].rstrip(","), 0)
+            except ValueError:
+                k = None
+            if k is not None:
+                if k > 0x7FFF:
+                    k -= 0x10000
+                target = pc + 4 + 4 * k
+                if not 0 <= target < size:
+                    return False
+        pc += length
+    return True
+
+
+def branch_closed_end(code: bytes, start: int, mcpu: str, disasm) -> int | None:
+    """The end (after its s_endpgm) of the shortest range from `start` through an aligned s_endpgm whose branches all
+    stay inside it, or None. Tried from the first s_endpgm on."""
+    pos = code.find(ENDPGM, start)
+    while pos >= 0:
+        if (pos - start) % 4 == 0:
+            asm, invalid, _ = disasm.disasm(code[start:pos + 4], mcpu, compute=True)
+            if asm.strip() and branch_targets_inside(asm, pos + 4 - start):
+                return pos + 4
+        pos = code.find(ENDPGM, pos + 1)
+    return None
+
+
+def unpack_payload(payload: bytes, last_endpgm: bool = False):
     status, entries = parse_fspx(payload)
     if status:
         return None, status
     blob = {k: payload[o:o + s] for k, (o, s) in entries.items()}
-    start, end = code_range(blob[6])
+    start, end = (code_range_last if last_endpgm else code_range)(blob[6])
     meta = {
         "version": struct.unpack_from("<I", payload, 4)[0],
         "directory": {str(k): [o, s] for k, (o, s) in sorted(entries.items())},
@@ -195,6 +242,9 @@ def main(argv=None) -> int:
     ap.add_argument("--mcpu", default="gfx1030",
                     help="llvm-mc CPU for --disasm (default gfx1030: the programs use v_dot4 instructions, which "
                          "gfx1010 and gfx1013 do not decode)")
+    ap.add_argument("--last-endpgm", action="store_true",
+                    help="end each program at its last s_endpgm, not its first (pipeline-library programs the "
+                         "runtime dumped with LEONIDA_DUMP_MISSING: early exits branch past the first)")
     a = ap.parse_args(argv)
     # An output in the input folder can replace a .dxbc input and, when the input is the folder itself,
     # os.makedirs writes there before open() tries to read the folder as a file. Refuse before either.
@@ -243,7 +293,7 @@ def main(argv=None) -> int:
             continue
         for n, (off, container, payload) in enumerate(items):
             name = f"{stem}_{n:02d}" if len(items) > 1 else stem
-            got, status = unpack_payload(payload)
+            got, status = unpack_payload(payload, a.last_endpgm)
             if not got:
                 print(f"{name}: FSPX status {status}", file=sys.stderr)
                 bad += 1
@@ -266,7 +316,12 @@ def main(argv=None) -> int:
             listing = None
             if disasm and meta["code"]["end"]:
                 start, end = meta["code"]["start"], meta["code"]["end"]
-                asm, invalid, err = disasm.disasm(blob[6][start:end], a.mcpu)
+                if a.last_endpgm:
+                    # The last s_endpgm can lie in data after the code; the first s_endpgm whose listing keeps
+                    # every branch inside the code is the program's end.
+                    end = branch_closed_end(blob[6], start, a.mcpu, disasm) or end
+                    meta["code"]["end"] = end
+                asm, invalid, err = disasm.disasm(blob[6][start:end], a.mcpu, compute=True)
                 if not asm.strip():
                     reason = (err.strip().splitlines() or ["no output"])[0]
                     print(f"{name}: {reason}", file=sys.stderr)

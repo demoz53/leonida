@@ -123,8 +123,10 @@ class Flbit64Tests(unittest.TestCase):
         self.assertEqual(run_lines(["s_flbit_i32_b64 s0, 1"])[0], 63)
         self.assertEqual(run_lines(["s_flbit_i32_i64 s0, -1"])[0], M32)
 
-    def test_lane_mask_source_is_rejected(self):
-        with self.assertRaises(rdna2spirv.Unsupported):
+    def test_lane_mask_source_translates(self):
+        # exec is a lane mask: the count comes from the subgroup's 64-bit mask (Gen.wave_mask), which the
+        # single-invocation interpreter cannot run, so this checks that it translates instead of being refused.
+        with self.assertRaises(si.UnsupportedConstruct):
             run_lines(["s_flbit_i32_b64 s0, exec"])
 
 
