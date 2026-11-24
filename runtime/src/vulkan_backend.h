@@ -2552,6 +2552,18 @@ private:
             discard();
             return ReplayResult::unsupported;
         }
+        // D3D12 ends every ExecuteCommandLists with all its work done and its writes visible to the next one on the
+        // queue (implicit state decay relies on it), and a list may then touch the same memory without a barrier:
+        // two submissions copying into one buffer, say. Vulkan orders submissions on a queue only by what their
+        // barriers say, so this one starts with a full memory barrier against everything submitted before it
+        // (synchronization validation: WRITE_AFTER_WRITE between vk_queue_test's back-to-back copies).
+        if (context_.vk.vkCmdPipelineBarrier) {  // a mocked context may leave it out
+            VkMemoryBarrier full{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            full.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+            full.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            context_.vk.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &full, 0, nullptr, 0, nullptr);
+        }
         if (!tracker_lock.owns_lock()) tracker_lock.lock();
         if (!transfer_only && context_.bindless_prepare_ && !context_.bindless_prepare_(command_buffer)) {
             const bool ended = context_.vk.vkEndCommandBuffer(command_buffer) == VK_SUCCESS;
