@@ -1029,5 +1029,83 @@ class TestVerifyCache(unittest.TestCase):
             self.assertNotIn(b"\r\n", f.read())
 
 
+class TestSaveVerifyCache(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cache = os.path.join(self.tmp.name, "cache.json")
+        self.neighbor = self.cache + ".tmp"
+        self.previous = b'{"version": 1, "files": {}}\n'
+        self.unrelated = b"an unrelated file that must survive"
+        with open(self.cache, "wb") as f:
+            f.write(self.previous)
+        with open(self.neighbor, "wb") as f:
+            f.write(self.unrelated)
+        self.entries = {"synthetic": {"stamp": [1, 2, 3, 4, 5], "sha256": "a" * 64}}
+
+    def assert_files_preserved(self) -> None:
+        with open(self.cache, "rb") as f:
+            self.assertEqual(f.read(), self.previous)
+        with open(self.neighbor, "rb") as f:
+            self.assertEqual(f.read(), self.unrelated)
+        self.assertEqual(sorted(os.listdir(self.tmp.name)), ["cache.json", "cache.json.tmp"])
+
+    def test_save_preserves_existing_tmp_neighbor(self) -> None:
+        mv.save_cache(self.cache, self.entries)
+        self.assertEqual(mv.load_cache(self.cache), self.entries)
+        with open(self.neighbor, "rb") as f:
+            self.assertEqual(f.read(), self.unrelated)
+        self.assertEqual(sorted(os.listdir(self.tmp.name)), ["cache.json", "cache.json.tmp"])
+
+    def test_serialization_failure_preserves_cache_and_neighbor(self) -> None:
+        with self.assertRaises(TypeError):
+            mv.save_cache(self.cache, {"not_json": object()})
+        self.assert_files_preserved()
+
+    def test_replace_failure_preserves_cache_and_neighbor(self) -> None:
+        with patch.object(mv.os, "replace", side_effect=PermissionError("replace denied")):
+            with self.assertRaisesRegex(PermissionError, "replace denied"):
+                mv.save_cache(self.cache, self.entries)
+        self.assert_files_preserved()
+
+    def test_overlapping_saves_have_independent_staging_files(self) -> None:
+        real_replace = os.replace
+        staged = []
+        inner = {"other": {"stamp": [5, 4, 3, 2, 1], "sha256": "b" * 64}}
+
+        def interleave(source, destination):
+            staged.append(source)
+            if len(staged) == 1:
+                # Finish a second save while the first is staged but not published.
+                mv.save_cache(self.cache, inner)
+                self.assertEqual(mv.load_cache(self.cache), inner)
+            real_replace(source, destination)
+
+        with patch.object(mv.os, "replace", side_effect=interleave):
+            mv.save_cache(self.cache, self.entries)
+        self.assertEqual(len(set(staged)), 2)
+        self.assertEqual(mv.load_cache(self.cache), self.entries)
+        self.assertEqual(sorted(os.listdir(self.tmp.name)), ["cache.json", "cache.json.tmp"])
+
+    def test_manifest_at_old_staging_name_survives_verification(self) -> None:
+        game = os.path.join(self.tmp.name, "game")
+        os.mkdir(game)
+        payload = b"synthetic data"
+        path = os.path.join(game, "sample.bin")
+        with open(path, "wb") as f:
+            f.write(payload)
+        os.utime(path, (time.time() - 60,) * 2)
+        manifest = json.dumps({"files": {"sample.bin": {
+            "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
+        }}}).encode("utf-8")
+        with open(self.neighbor, "wb") as f:
+            f.write(manifest)
+        report = mv.verify_manifest(game, self.neighbor, cache_path=self.cache)
+        self.assertTrue(report.passed)
+        with open(self.neighbor, "rb") as f:
+            self.assertEqual(f.read(), manifest)
+        self.assertEqual(len(mv.load_cache(self.cache)), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
