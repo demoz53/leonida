@@ -45,7 +45,8 @@ def build(dxbc: str, spirv: str) -> dict:
     workspace = os.path.dirname(os.path.realpath(spirv))
     if os.path.commonpath((workspace, os.path.realpath(dxbc))) != workspace:
         raise ValueError("the carved folder must be inside the same shader workspace as the translation")
-    with open(os.path.join(spirv, "index.json"), encoding="utf-8") as f:
+    # utf-8-sig, as make_game.py reads this index: a BOM-marked index stays usable (#494's recovery keeps one)
+    with open(os.path.join(spirv, "index.json"), encoding="utf-8-sig") as f:
         index = json.load(f)
     if not isinstance(index, dict):
         raise ValueError("index.json is not an object")
