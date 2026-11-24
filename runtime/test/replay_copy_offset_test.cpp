@@ -15,13 +15,27 @@ std::vector<VkBufferImageCopy> b2i_copies;
 std::vector<VkBufferImageCopy> i2b_copies;
 std::vector<leonida::Depth24Job> depth24_jobs;
 
-VKAPI_ATTR void VKAPI_CALL noop_barrier(VkCommandBuffer, VkPipelineStageFlags, VkPipelineStageFlags, VkDependencyFlags,
-                                        std::uint32_t, const VkMemoryBarrier*, std::uint32_t,
-                                        const VkBufferMemoryBarrier*, std::uint32_t, const VkImageMemoryBarrier*) {}
+// Whether a barrier since the last buffer copy ordered earlier transfer writes before transfer reads and writes, and
+// that answer for each vkCmdCopyBuffer in turn: D3D12 orders back-to-back copies, Vulkan needs the barrier.
+bool transfer_writes_ordered = false;
+std::vector<bool> buffer_copy_ordered;
+
+VKAPI_ATTR void VKAPI_CALL rec_barrier(VkCommandBuffer, VkPipelineStageFlags src_stages, VkPipelineStageFlags dst_stages,
+                                       VkDependencyFlags, std::uint32_t memory_count, const VkMemoryBarrier* memory,
+                                       std::uint32_t, const VkBufferMemoryBarrier*, std::uint32_t,
+                                       const VkImageMemoryBarrier*) {
+    const VkAccessFlags after = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    for (std::uint32_t i = 0; i < memory_count; ++i)
+        if ((src_stages & VK_PIPELINE_STAGE_TRANSFER_BIT) && (dst_stages & VK_PIPELINE_STAGE_TRANSFER_BIT) &&
+            (memory[i].srcAccessMask & VK_ACCESS_TRANSFER_WRITE_BIT) && (memory[i].dstAccessMask & after) == after)
+            transfer_writes_ordered = true;
+}
 
 VKAPI_ATTR void VKAPI_CALL rec_copy_buffer(VkCommandBuffer, VkBuffer, VkBuffer, std::uint32_t count,
                                            const VkBufferCopy* regions) {
     for (std::uint32_t i = 0; i < count; ++i) buffer_copies.push_back(regions[i]);
+    buffer_copy_ordered.push_back(transfer_writes_ordered);
+    transfer_writes_ordered = false;
 }
 
 VKAPI_ATTR void VKAPI_CALL rec_copy_b2i(VkCommandBuffer, VkBuffer, VkImage, VkImageLayout, std::uint32_t count,
@@ -56,7 +70,7 @@ int main() {
     using namespace leonida;
 
     ReplayFunctions vk{};
-    vk.pipeline_barrier = noop_barrier;
+    vk.pipeline_barrier = rec_barrier;
     vk.copy_buffer = rec_copy_buffer;
     vk.copy_buffer_to_image = rec_copy_b2i;
     vk.copy_image_to_buffer = rec_copy_i2b;
@@ -135,6 +149,8 @@ int main() {
 
     const auto run = [&](const CommandList& list) {
         buffer_copies.clear();
+        buffer_copy_ordered.clear();
+        transfer_writes_ordered = false;
         b2i_copies.clear();
         i2b_copies.clear();
         depth24_jobs.clear();
@@ -149,6 +165,21 @@ int main() {
         expect(buffer_copies.size() == 1 && buffer_copies[0].srcOffset == src_buf.buffer_offset &&
                    buffer_copies[0].dstOffset == dst_buf.buffer_offset && buffer_copies[0].size == src_buf.size,
                "CopyResource applies src and dst buffer_offset");
+        expect(buffer_copy_ordered == std::vector<bool>{true},
+               "a buffer copy is ordered after earlier transfer writes (an earlier list on the queue may have written)");
+    }
+
+    // 1b. Back-to-back copies into the same buffer, with no barrier from the application: D3D12 runs them in order,
+    // so each vkCmdCopyBuffer needs its own barrier after the transfer write before it (one barrier ahead of the
+    // first copy would leave the second unordered against the first).
+    {
+        CommandList list;
+        expect(list.copy_buffer({2, 0, 1, 0, 256}) && list.copy_buffer({2, 128, 1, 512, 256}) && list.close(),
+               "record two overlapping CopyBufferRegion calls");
+        expect(run(list) == ReplayResult::success, "back-to-back buffer copies replay");
+        expect(buffer_copies.size() == 2, "both buffer copies are emitted");
+        expect(buffer_copy_ordered == (std::vector<bool>{true, true}),
+               "each back-to-back buffer copy is ordered after the transfer write before it");
     }
 
     // 2. CopyResource within a single shared backing VkBuffer (arena): disjoint & adjacent succeed, overlap fails.
