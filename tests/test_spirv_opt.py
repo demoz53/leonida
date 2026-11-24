@@ -17,6 +17,7 @@ for _p in (TOOLS, SEMANTIC):
         sys.path.insert(0, _p)
 
 import rdna2spirv  # noqa: E402
+import spirv_asm  # noqa: E402
 import spirv_opt  # noqa: E402
 import support  # noqa: E402
 
@@ -25,6 +26,7 @@ SPIRV_VAL = shutil.which("spirv-val")
 
 
 def _validate(spvasm: str) -> None:
+    spirv_asm.assemble(spvasm)
     if not (SPIRV_AS and SPIRV_VAL):
         return
     with tempfile.TemporaryDirectory() as d:
@@ -565,6 +567,242 @@ class SpirvOptTests(unittest.TestCase):
         # All dead decorated ops and their dangling decorations must be gone.
         for dead in ("%dead_grp", "%dead_only", "%dead_str", "%dead_g", "%dead_id"):
             self.assertNotIn(dead, opt)
+
+    def test_mixed_signedness_identities_and_vector_iequal_stay_type_safe(self):
+        spv = "\n".join([
+            "               OpCapability Shader",
+            "               OpMemoryModel Logical GLSL450",
+            '               OpEntryPoint Fragment %main "main" %in0 %out0',
+            "               OpExecutionMode %main OriginUpperLeft",
+            "               OpDecorate %in0 Location 0",
+            "               OpDecorate %in0 Flat",
+            "               OpDecorate %out0 Location 0",
+            "       %void = OpTypeVoid",
+            "       %fn_t = OpTypeFunction %void",
+            "       %uint = OpTypeInt 32 0",
+            "        %int = OpTypeInt 32 1",
+            "       %bool = OpTypeBool",
+            "     %v4bool = OpTypeVector %bool 4",
+            "     %v4uint = OpTypeVector %uint 4",
+            "    %_ptr_In = OpTypePointer Input %int",
+            "   %_ptr_Out = OpTypePointer Output %v4uint",
+            "        %u0  = OpConstant %uint 0",
+            "        %u32 = OpConstant %uint 32",
+            "       %uall = OpConstant %uint 4294967295",
+            "        %i0  = OpConstant %int 0",
+            "       %iall = OpConstant %int -1",
+            "       %true = OpConstantTrue %bool",
+            "      %false = OpConstantFalse %bool",
+            "        %in0 = OpVariable %_ptr_In Input",
+            "       %out0 = OpVariable %_ptr_Out Output",
+            "       %main = OpFunction %void None %fn_t",
+            "      %entry = OpLabel",
+            "        %ix  = OpLoad %int %in0",
+            "         %ux = OpBitcast %uint %ix",
+            "          %a = OpIAdd %uint %ix %u0",
+            "          %b = OpBitFieldUExtract %uint %ix %u0 %u32",
+            "          %c = OpIMul %uint %a %i0",
+            "          %d = OpBitwiseAnd %uint %a %iall",
+            "          %e = OpBitwiseOr %uint %a %iall",
+            "        %oka = OpIAdd %uint %ux %u0",
+            "        %okb = OpBitFieldUExtract %uint %ux %u0 %u0",
+            "        %okc = OpBitwiseAnd %uint %ux %u0",
+            "        %okd = OpBitwiseOr %uint %ux %uall",
+            "          %v = OpCompositeConstruct %v4uint %a %b %c %oka",
+            "        %veq = OpIEqual %v4bool %v %v",
+            "        %eq0 = OpCompositeExtract %bool %veq 0",
+            "        %mix = OpBitwiseXor %uint %d %u32",
+            "        %okx = OpBitwiseOr %uint %okb %okc",
+            "        %oky = OpBitwiseOr %uint %okx %okd",
+            "        %sel = OpSelect %uint %eq0 %oky %mix",
+            "        %res = OpCompositeConstruct %v4uint %a %b %sel %ux",
+            "               OpStore %out0 %res",
+            "               OpReturn",
+            "               OpFunctionEnd",
+            "",
+        ])
+        _validate(spv)
+        opt = spirv_opt.optimize(spv)
+        _validate(opt)
+        # Mixed-signedness operands and vector OpIEqual must keep their exact types (never replaced by %ix/%i0/%true).
+        self.assertIn("%a = OpIAdd %uint %ix %u0", opt)
+        self.assertIn("%b = OpBitFieldUExtract %uint %ix %u0 %u32", opt)
+        self.assertIn("%veq = OpIEqual %v4bool %v %v", opt)
+        # Absorbing zero / all-ones and same-type identities fold to %uint constants cleanly.
+        self.assertNotIn("%oka = OpIAdd", opt)
+        self.assertNotIn("%okb = OpBitFieldUExtract", opt)
+        self.assertNotIn("%okc = OpBitwiseAnd", opt)
+        self.assertNotIn("%okd = OpBitwiseOr", opt)
+        self.assertIn("OpSelect %uint %eq0 %uall %mix", opt)
+
+    def test_constant_bitcast_select_compare_and_const_branch_folding(self):
+        spv = "\n".join([
+            "               OpCapability Shader",
+            "               OpMemoryModel Logical GLSL450",
+            '               OpEntryPoint Fragment %main "main" %in0 %out0',
+            "               OpExecutionMode %main OriginUpperLeft",
+            "               OpDecorate %in0 Location 0",
+            "               OpDecorate %in0 Flat",
+            "               OpDecorate %out0 Location 0",
+            "       %void = OpTypeVoid",
+            "       %fn_t = OpTypeFunction %void",
+            "       %bool = OpTypeBool",
+            "       %uint = OpTypeInt 32 0",
+            "      %float = OpTypeFloat 32",
+            "     %v4uint = OpTypeVector %uint 4",
+            "    %_ptr_In = OpTypePointer Input %uint",
+            "   %_ptr_Out = OpTypePointer Output %v4uint",
+            "         %u0 = OpConstant %uint 0",
+            "         %u2 = OpConstant %uint 2",
+            "         %u6 = OpConstant %uint 6",
+            "         %u7 = OpConstant %uint 7",
+            "         %u9 = OpConstant %uint 9",
+            "   %u3f800000 = OpConstant %uint 1065353216",
+            "   %u80000000 = OpConstant %uint 2147483648",
+            "         %f0 = OpConstant %float 0",
+            "         %f1 = OpConstant %float 1",
+            "        %fn0 = OpConstant %float -0.0",
+            "       %true = OpConstantTrue %bool",
+            "      %false = OpConstantFalse %bool",
+            "        %in0 = OpVariable %_ptr_In Input",
+            "       %out0 = OpVariable %_ptr_Out Output",
+            "       %main = OpFunction %void None %fn_t",
+            "      %entry = OpLabel",
+            "        %x   = OpLoad %uint %in0",
+            "        %bc0 = OpBitcast %float %u0",
+            "        %bc1 = OpBitcast %float %u3f800000",
+            "        %bcn = OpBitcast %float %u80000000",
+            "        %bid = OpBitcast %uint %x",
+            "        %ub0 = OpBitcast %uint %bc0",
+            "        %ub1 = OpBitcast %uint %bc1",
+            "        %ubn = OpBitcast %uint %bcn",
+            "        %cnd = OpIEqual %bool %bid %u7",
+            "        %ncd = OpLogicalNot %bool %cnd",
+            "         %s1 = OpSelect %uint %cnd %u7 %u6",
+            "         %s2 = OpSelect %uint %cnd %s1 %u9",
+            "        %eq7 = OpIEqual %bool %s1 %u7",
+            "        %ne7 = OpINotEqual %bool %s1 %u7",
+            "        %eq2 = OpIEqual %bool %s1 %u2",
+            "        %w0  = OpSelect %uint %eq7 %u7 %u0",
+            "        %w1  = OpSelect %uint %ne7 %u6 %u2",
+            "        %w2  = OpSelect %uint %eq2 %u9 %s2",
+            "               OpSelectionMerge %m_a None",
+            "               OpBranchConditional %false %dead_a %m_a",
+            "     %dead_a = OpLabel",
+            "        %da  = OpIAdd %uint %x %u9",
+            "               OpBranch %m_a",
+            "        %m_a = OpLabel",
+            "      %phi_a = OpPhi %uint %u0 %entry %da %dead_a",
+            "               OpSelectionMerge %m_b None",
+            "               OpBranchConditional %true %then_b %m_b",
+            "     %then_b = OpLabel",
+            "        %db  = OpIAdd %uint %w0 %phi_a",
+            "               OpBranch %m_b",
+            "        %m_b = OpLabel",
+            "      %phi_b = OpPhi %uint %u0 %m_a %db %then_b",
+            "        %sum = OpIAdd %uint %ub0 %ub1",
+            "       %mix0 = OpBitwiseOr %uint %sum %ubn",
+            "       %mix1 = OpIAdd %uint %w1 %w2",
+            "        %out = OpCompositeConstruct %v4uint %phi_b %mix0 %mix1 %bid",
+            "               OpStore %out0 %out",
+            "               OpReturn",
+            "               OpFunctionEnd",
+            "",
+        ])
+        _validate(spv)
+        opt = spirv_opt.optimize(spv)
+        _validate(opt)
+        # Constant bitcasts fold while distinguishing +0.0 from -0.0; identity bitcast folds away.
+        self.assertNotIn("OpBitcast", opt)
+        self.assertNotIn("%s1 = OpSelect", opt)
+        self.assertNotIn("= OpIEqual %bool %s1", opt)
+        self.assertNotIn("= OpINotEqual %bool %s1", opt)
+        # Both constant OpBranchConditional selections and %dead_a are eliminated.
+        self.assertNotIn("OpBranchConditional", opt)
+        self.assertNotIn("%dead_a", opt)
+        # Execute via spirv_mini_interp for exact value equivalence (both x=7 and x=5).
+        for iv in (5, 7):
+            r_out = list(support.run_fragment(spv, inputs={"%in0": iv})["%out0"])
+            o_out = list(support.run_fragment(opt, inputs={"%in0": iv})["%out0"])
+            self.assertEqual(o_out, r_out)
+
+    def test_cross_block_dead_store_and_dead_phi_cycle_dce(self):
+        spv = "\n".join([
+            "               OpCapability Shader",
+            "               OpMemoryModel Logical GLSL450",
+            '               OpEntryPoint Fragment %main "main" %in0 %out0',
+            "               OpExecutionMode %main OriginUpperLeft",
+            "               OpDecorate %in0 Location 0",
+            "               OpDecorate %in0 Flat",
+            "               OpDecorate %out0 Location 0",
+            "               OpDecorateId %out0 CounterBuffer %keep_dec",
+            "       %void = OpTypeVoid",
+            "       %fn_t = OpTypeFunction %void",
+            "       %bool = OpTypeBool",
+            "       %uint = OpTypeInt 32 0",
+            "     %v4uint = OpTypeVector %uint 4",
+            "    %_ptr_In = OpTypePointer Input %uint",
+            "   %_ptr_Out = OpTypePointer Output %v4uint",
+            "   %_ptr_Fun = OpTypePointer Function %uint",
+            "         %u0 = OpConstant %uint 0",
+            "         %u1 = OpConstant %uint 1",
+            "         %u2 = OpConstant %uint 2",
+            "         %u3 = OpConstant %uint 3",
+            "      %false = OpConstantFalse %bool",
+            "        %in0 = OpVariable %_ptr_In Input",
+            "       %out0 = OpVariable %_ptr_Out Output",
+            "       %main = OpFunction %void None %fn_t",
+            "      %entry = OpLabel",
+            "         %v0 = OpVariable %_ptr_Fun Function",
+            "       %v_lp = OpVariable %_ptr_Fun Function",
+            "         %x  = OpLoad %uint %in0",
+            "         %c  = OpIEqual %bool %x %u0",
+            "   %keep_dec = OpIAdd %uint %x %u1",
+            "               OpStore %v0 %u1",
+            "               OpStore %v_lp %u2",
+            "               OpSelectionMerge %merge None",
+            "               OpBranchConditional %c %then_b %else_b",
+            "     %then_b = OpLabel",
+            "               OpStore %v0 %u2",
+            "               OpBranch %merge",
+            "     %else_b = OpLabel",
+            "               OpStore %v0 %u3",
+            "               OpBranch %merge",
+            "      %merge = OpLabel",
+            "        %got = OpLoad %uint %v0",
+            "               OpBranch %head",
+            "       %head = OpLabel",
+            "   %dead_phi = OpPhi %uint %u0 %merge %dead_nxt %latch",
+            "               OpLoopMerge %exit %latch None",
+            "               OpBranch %body",
+            "       %body = OpLabel",
+            "      %r_lp  = OpLoad %uint %v_lp",
+            "               OpStore %v_lp %u3",
+            "               OpSelectionMerge %b_m None",
+            "               OpBranchConditional %false %latch %exit",
+            "        %b_m = OpLabel",
+            "               OpUnreachable",
+            "      %latch = OpLabel",
+            "   %dead_nxt = OpIAdd %uint %dead_phi %u1",
+            "               OpBranch %head",
+            "       %exit = OpLabel",
+            "        %res = OpCompositeConstruct %v4uint %got %r_lp %u0 %u0",
+            "               OpStore %out0 %res",
+            "               OpReturn",
+            "               OpFunctionEnd",
+            "",
+        ])
+        opt = spirv_opt.optimize(spv)
+        # Initial OpStore %v0 %u1 is killed cross-block because both %then_b and %else_b overwrite %v0 before %merge.
+        self.assertNotIn("OpStore %v0 %u1", opt)
+        # Initial OpStore %v_lp %u2 must NOT be killed because %head/%body reads %v_lp on entry.
+        self.assertIn("OpStore %v_lp %u2", opt)
+        # Dead phi cycle (%dead_phi <-> %dead_nxt) is collected by mark-and-sweep DCE.
+        self.assertNotIn("%dead_phi", opt)
+        self.assertNotIn("%dead_nxt", opt)
+        # OpDecorateId operand %keep_dec survives DCE even without other uses in %main.
+        self.assertIn("%keep_dec = OpIAdd", opt)
+        self.assertIn("OpDecorateId %out0 CounterBuffer %keep_dec", opt)
 
 
 if __name__ == "__main__":

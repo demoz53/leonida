@@ -39,6 +39,8 @@ As a CLI:
 Usage: `python -I tools/spirv_opt.py --help` lists the options.
 """
 import argparse
+import math
+import struct
 import sys
 
 _PURE_OPS = frozenset((
@@ -211,23 +213,29 @@ def _build_cfg_and_dom(insts: list[list]):
 
 
 def _fold_int_op(op: str, res_ty: str, args: list[str],
+                 id_type: dict[str, str], bool_type_id: str | None,
                  const_int_val: dict[str, tuple[str, int, int, int]],
                  int_const_by_val: dict[tuple[str, int], str],
                  int_type_info: dict[str, tuple[int, int]],
                  const_true_id: str | None, const_false_id: str | None) -> str | None:
     """Fold constant/algebraic integer/bit operations into an existing SSA ID, or return None."""
     n = len(args)
+    dst_info = int_type_info.get(res_ty)
+    is_scalar_bool = bool_type_id is not None and res_ty == bool_type_id
+
+    def same_ty(tok: str) -> str | None:
+        return tok if id_type.get(tok) == res_ty else None
+
     if op == "OpNot" and n == 2:
         c1 = const_int_val.get(args[1])
-        if c1 is not None:
-            ty, v1, w, _ = c1
+        if c1 is not None and dst_info is not None and dst_info[0] == c1[2]:
+            _, v1, w, _ = c1
             mask = (1 << w) - 1
             return int_const_by_val.get((res_ty, (~v1) & mask))
         return None
 
     if op == "OpUConvert" and n == 2:
         c1 = const_int_val.get(args[1])
-        dst_info = int_type_info.get(res_ty)
         if c1 is not None and dst_info is not None:
             _, v1, _, _ = c1
             dw, _ = dst_info
@@ -238,16 +246,17 @@ def _fold_int_op(op: str, res_ty: str, args: list[str],
         base, off_id, cnt_id = args[1], args[2], args[3]
         co = const_int_val.get(off_id)
         cc = const_int_val.get(cnt_id)
-        dst_info = int_type_info.get(res_ty)
         if co is not None and cc is not None and dst_info is not None:
             w, _ = dst_info
             off = co[1]
             cnt = cc[1]
             if off == 0 and cnt == w:
-                return base
+                return same_ty(base)
+            if cnt == 0 and off <= w:
+                return int_const_by_val.get((res_ty, 0))
             cb = const_int_val.get(base)
             if cb is not None and off <= w and cnt <= w and off + cnt <= w:
-                val = 0 if cnt == 0 else ((cb[1] >> off) & ((1 << cnt) - 1))
+                val = (cb[1] >> off) & ((1 << cnt) - 1)
                 return int_const_by_val.get((res_ty, val))
         return None
 
@@ -262,31 +271,32 @@ def _fold_int_op(op: str, res_ty: str, args: list[str],
     if c1 is not None and c2 is not None:
         _, v1, w1, _ = c1
         _, v2, w2, _ = c2
-        mask = (1 << w1) - 1
-        if op == "OpIAdd":
-            return int_const_by_val.get((res_ty, (v1 + v2) & mask))
-        if op == "OpISub":
-            return int_const_by_val.get((res_ty, (v1 - v2) & mask))
-        if op == "OpIMul":
-            return int_const_by_val.get((res_ty, (v1 * v2) & mask))
-        if op == "OpUDiv" and v2 != 0:
-            return int_const_by_val.get((res_ty, (v1 // v2) & mask))
-        if op == "OpUMod" and v2 != 0:
-            return int_const_by_val.get((res_ty, (v1 % v2) & mask))
-        if op == "OpBitwiseAnd":
-            return int_const_by_val.get((res_ty, (v1 & v2) & mask))
-        if op == "OpBitwiseOr":
-            return int_const_by_val.get((res_ty, (v1 | v2) & mask))
-        if op == "OpBitwiseXor":
-            return int_const_by_val.get((res_ty, (v1 ^ v2) & mask))
-        if op == "OpShiftLeftLogical" and v2 < w1:
-            return int_const_by_val.get((res_ty, (v1 << v2) & mask))
-        if op == "OpShiftRightLogical" and v2 < w1:
-            return int_const_by_val.get((res_ty, (v1 >> v2) & mask))
-        if op == "OpShiftRightArithmetic" and v2 < w1:
-            sv1 = _to_signed(v1, w1)
-            return int_const_by_val.get((res_ty, (sv1 >> v2) & mask))
-        if const_true_id is not None and const_false_id is not None and w1 == w2:
+        if dst_info is not None and dst_info[0] == w1:
+            mask = (1 << w1) - 1
+            if op == "OpIAdd":
+                return int_const_by_val.get((res_ty, (v1 + v2) & mask))
+            if op == "OpISub":
+                return int_const_by_val.get((res_ty, (v1 - v2) & mask))
+            if op == "OpIMul":
+                return int_const_by_val.get((res_ty, (v1 * v2) & mask))
+            if op == "OpUDiv" and v2 != 0:
+                return int_const_by_val.get((res_ty, (v1 // v2) & mask))
+            if op == "OpUMod" and v2 != 0:
+                return int_const_by_val.get((res_ty, (v1 % v2) & mask))
+            if op == "OpBitwiseAnd":
+                return int_const_by_val.get((res_ty, (v1 & v2) & mask))
+            if op == "OpBitwiseOr":
+                return int_const_by_val.get((res_ty, (v1 | v2) & mask))
+            if op == "OpBitwiseXor":
+                return int_const_by_val.get((res_ty, (v1 ^ v2) & mask))
+            if op == "OpShiftLeftLogical" and v2 < w1:
+                return int_const_by_val.get((res_ty, (v1 << v2) & mask))
+            if op == "OpShiftRightLogical" and v2 < w1:
+                return int_const_by_val.get((res_ty, (v1 >> v2) & mask))
+            if op == "OpShiftRightArithmetic" and v2 < w1:
+                sv1 = _to_signed(v1, w1)
+                return int_const_by_val.get((res_ty, (sv1 >> v2) & mask))
+        if is_scalar_bool and const_true_id is not None and const_false_id is not None and w1 == w2:
             if op == "OpIEqual":
                 return const_true_id if v1 == v2 else const_false_id
             if op == "OpINotEqual":
@@ -310,83 +320,88 @@ def _fold_int_op(op: str, res_ty: str, args: list[str],
                 return const_true_id if sv1 >= sv2 else const_false_id
         return None
 
-    # Algebraic identities with one constant or identical operands (all bit-exact for SPIR-V ints).
-    dst_info = int_type_info.get(res_ty)
+    # Algebraic identities with one constant or identical operands (type-preserving for SPIR-V ints).
     dst_mask = (1 << dst_info[0]) - 1 if dst_info is not None else None
 
     if op == "OpIAdd":
         if c2 is not None and c2[1] == 0:
-            return a1
+            return same_ty(a1)
         if c1 is not None and c1[1] == 0:
-            return a2
+            return same_ty(a2)
     elif op == "OpISub":
         if c2 is not None and c2[1] == 0:
-            return a1
+            return same_ty(a1)
         if a1 == a2:
             return int_const_by_val.get((res_ty, 0))
     elif op == "OpIMul":
         if c2 is not None:
             if c2[1] == 1:
-                return a1
+                return same_ty(a1)
             if c2[1] == 0:
-                return a2
+                return int_const_by_val.get((res_ty, 0))
         if c1 is not None:
             if c1[1] == 1:
-                return a2
+                return same_ty(a2)
             if c1[1] == 0:
-                return a1
+                return int_const_by_val.get((res_ty, 0))
     elif op == "OpBitwiseAnd":
         if a1 == a2:
-            return a1
+            return same_ty(a1)
         if c2 is not None:
             if c2[1] == 0:
-                return a2
+                return int_const_by_val.get((res_ty, 0))
             if dst_mask is not None and c2[1] == dst_mask:
-                return a1
+                return same_ty(a1)
         if c1 is not None:
             if c1[1] == 0:
-                return a1
+                return int_const_by_val.get((res_ty, 0))
             if dst_mask is not None and c1[1] == dst_mask:
-                return a2
+                return same_ty(a2)
     elif op == "OpBitwiseOr":
         if a1 == a2:
-            return a1
+            return same_ty(a1)
         if c2 is not None:
             if c2[1] == 0:
-                return a1
+                return same_ty(a1)
             if dst_mask is not None and c2[1] == dst_mask:
-                return a2
+                return int_const_by_val.get((res_ty, dst_mask))
         if c1 is not None:
             if c1[1] == 0:
-                return a2
+                return same_ty(a2)
             if dst_mask is not None and c1[1] == dst_mask:
-                return a1
+                return int_const_by_val.get((res_ty, dst_mask))
     elif op == "OpBitwiseXor":
         if a1 == a2:
             return int_const_by_val.get((res_ty, 0))
         if c2 is not None and c2[1] == 0:
-            return a1
+            return same_ty(a1)
         if c1 is not None and c1[1] == 0:
-            return a2
+            return same_ty(a2)
     elif op in ("OpShiftLeftLogical", "OpShiftRightLogical", "OpShiftRightArithmetic"):
         if c2 is not None and c2[1] == 0:
-            return a1
+            return same_ty(a1)
         if op != "OpShiftRightArithmetic" and c1 is not None and c1[1] == 0:
-            return a1
-    elif op == "OpIEqual" and a1 == a2:
-        return const_true_id
-    elif op == "OpINotEqual" and a1 == a2:
-        return const_false_id
+            return int_const_by_val.get((res_ty, 0))
+    elif is_scalar_bool and a1 == a2:
+        if op in ("OpIEqual", "OpULessThanEqual", "OpUGreaterThanEqual", "OpSLessThanEqual", "OpSGreaterThanEqual"):
+            return const_true_id
+        if op in ("OpINotEqual", "OpULessThan", "OpUGreaterThan", "OpSLessThan", "OpSGreaterThan"):
+            return const_false_id
     return None
 
 
 def _optimize_function(body_lines: list[str], const_ids: set[str], const_true: set[str],
                        const_false: set[str], const_null_elem_zero: dict[str, str],
-                       const_type: dict[str, str], const_int_val: dict[str, tuple[str, int, int, int]],
+                       const_type: dict[str, str], bool_type_id: str | None,
+                       float_type_width: dict[str, int],
+                       const_bits: dict[str, tuple[str, int, int]],
+                       const_by_bits: dict[tuple[str, int], str],
+                       const_int_val: dict[str, tuple[str, int, int, int]],
                        int_const_by_val: dict[tuple[str, int], str],
                        int_type_info: dict[str, tuple[int, int]],
                        readonly_global_vars: set[str], glsl_sets: set[str],
-                       decorated_ids: set[str], max_passes: int = 4) -> tuple[list[str], set[str]]:
+                       decorated_ids: set[str], decorate_operand_ids: set[str],
+                       max_passes: int = 4) -> tuple[list[str], set[str]]:
     """Optimize one OpFunction ... OpFunctionEnd slice. Returns (new_lines, deleted_ids)."""
     insts: list[list] = []
     for raw in body_lines:
@@ -553,11 +568,13 @@ def _optimize_function(body_lines: list[str], const_ids: set[str], const_true: s
         # Scoped dominator-tree tables (maintained via undo logs during iterative DFS).
         ac_cse: dict[tuple, str] = {}
         val_cse: dict[tuple, str] = {}
-        ro_load_cse: dict[tuple, str] = {}        # (res_ty, ptr_id) -> loaded_id for Input / PushConstant
-        bitcast_of: dict[str, tuple[str, str]] = {}   # res_id -> (src_id, src_type_id)
-        bool_mask_of: dict[str, tuple[str, bool]] = {}  # res_id -> (cond_id, True if cond->nz/!cond->0 else inverted)
-        ctor_elems: dict[str, list[str]] = {}     # composite_id -> list of constituent IDs
-        logical_not_of: dict[str, str] = {}       # res_id -> inner bool ID
+        ro_load_cse: dict[tuple, str] = {}             # (res_ty, ptr_id) -> loaded_id for Input / PushConstant
+        bitcast_of: dict[str, tuple[str, str]] = {}        # res_id -> (src_id, src_type_id)
+        select_of: dict[str, tuple[str, str, str]] = {}    # res_id -> (cond_id, true_val, false_val)
+        select_consts: dict[str, tuple[str, int, int, int]] = {}  # res_id -> (cond_id, val_true, val_false, width)
+        ctor_elems: dict[str, list[str]] = {}              # composite_id -> list of constituent IDs
+        logical_not_of: dict[str, str] = {}                # not_res_id -> inner bool ID
+        not_of_bool: dict[str, str] = {}                   # inner bool ID -> dominating not_res_id
 
         def process_block(b: int, slot_val: dict[tuple, str], entry_null_zero: dict[str, str],
                           reachable: bool):
@@ -567,9 +584,11 @@ def _optimize_function(body_lines: list[str], const_ids: set[str], const_true: s
             undo_val: list[tuple] = []
             undo_ro: list[tuple] = []
             undo_bc: list[str] = []
-            undo_bm: list[str] = []
+            undo_so: list[str] = []
+            undo_sc: list[str] = []
             undo_ce: list[str] = []
             undo_ln: list[str] = []
+            undo_nob: list[str] = []
 
             for idx in blocks[b]:
                 entry = insts[idx]
@@ -608,6 +627,12 @@ def _optimize_function(body_lines: list[str], const_ids: set[str], const_true: s
                         continue
                     if op == "OpBitcast" and len(args) == 2:
                         dst_ty, src = args[0], args[1]
+                        if id_type.get(src) == dst_ty:
+                            alias[res] = src
+                            dead_idx.add(idx)
+                            deleted_ids.add(res)
+                            changed = True
+                            continue
                         prev_bc = bitcast_of.get(src)
                         if prev_bc is not None and prev_bc[1] == dst_ty:
                             alias[res] = prev_bc[0]
@@ -615,6 +640,18 @@ def _optimize_function(body_lines: list[str], const_ids: set[str], const_true: s
                             deleted_ids.add(res)
                             changed = True
                             continue
+                        cb = const_bits.get(src)
+                        if cb is not None:
+                            _, bits, sw = cb
+                            dw = int_type_info[dst_ty][0] if dst_ty in int_type_info else float_type_width.get(dst_ty)
+                            if dw == sw:
+                                folded_bc = const_by_bits.get((dst_ty, bits))
+                                if folded_bc is not None:
+                                    alias[res] = folded_bc
+                                    dead_idx.add(idx)
+                                    deleted_ids.add(res)
+                                    changed = True
+                                    continue
                         src_ty = id_type.get(src)
                         if src_ty is not None:
                             bitcast_of[res] = (src, src_ty)
@@ -634,6 +671,18 @@ def _optimize_function(body_lines: list[str], const_ids: set[str], const_true: s
                                 continue
                     if op == "OpSelect" and len(args) == 4:
                         cond, x, y = args[1], args[2], args[3]
+                        sx = select_of.get(x)
+                        if sx is not None and sx[0] == cond and sx[1] != x:
+                            x = sx[1]
+                            entry[2][2] = x
+                            args = entry[2]
+                            changed = True
+                        sy = select_of.get(y)
+                        if sy is not None and sy[0] == cond and sy[2] != y:
+                            y = sy[2]
+                            entry[2][3] = y
+                            args = entry[2]
+                            changed = True
                         if cond in const_true or x == y:
                             alias[res] = x
                             dead_idx.add(idx)
@@ -652,15 +701,22 @@ def _optimize_function(body_lines: list[str], const_ids: set[str], const_true: s
                             deleted_ids.add(res)
                             changed = True
                             continue
+                        if (x in const_false and y in const_true
+                                and bool_type_id is not None and args[0] == bool_type_id):
+                            repl = logical_not_of.get(cond) or not_of_bool.get(cond)
+                            if repl is not None:
+                                alias[res] = repl
+                                dead_idx.add(idx)
+                                deleted_ids.add(res)
+                                changed = True
+                                continue
+                        select_of[res] = (cond, x, y)
+                        undo_so.append(res)
                         cx = const_int_val.get(x)
                         cy = const_int_val.get(y)
-                        if cx is not None and cy is not None:
-                            if cx[1] != 0 and cy[1] == 0:
-                                bool_mask_of[res] = (cond, True)
-                                undo_bm.append(res)
-                            elif cx[1] == 0 and cy[1] != 0:
-                                bool_mask_of[res] = (cond, False)
-                                undo_bm.append(res)
+                        if cx is not None and cy is not None and cx[2] == cy[2]:
+                            select_consts[res] = (cond, cx[1], cy[1], cx[2])
+                            undo_sc.append(res)
                     if op == "OpLogicalNot" and len(args) == 2:
                         inner = args[1]
                         if inner in const_true and const_false_id is not None:
@@ -684,6 +740,9 @@ def _optimize_function(body_lines: list[str], const_ids: set[str], const_true: s
                             continue
                         logical_not_of[res] = inner
                         undo_ln.append(res)
+                        if inner not in not_of_bool:
+                            not_of_bool[inner] = res
+                            undo_nob.append(inner)
                     if op == "OpLogicalAnd" and len(args) == 3:
                         a1, a2 = args[1], args[2]
                         if a1 == a2 or a2 in const_true:
@@ -736,15 +795,30 @@ def _optimize_function(body_lines: list[str], const_ids: set[str], const_true: s
                             deleted_ids.add(res)
                             changed = True
                             continue
-                    if op in ("OpINotEqual", "OpIEqual") and len(args) == 3:
+                    if (op in ("OpINotEqual", "OpIEqual") and len(args) == 3
+                            and bool_type_id is not None and args[0] == bool_type_id):
                         a1, a2 = args[1], args[2]
                         for cand, other in ((a1, a2), (a2, a1)):
-                            bm = bool_mask_of.get(cand)
+                            sc = select_consts.get(cand)
                             co = const_int_val.get(other)
-                            if bm is not None and co is not None and co[1] == 0:
-                                cond_id, normal = bm
-                                if (op == "OpINotEqual" and normal) or (op == "OpIEqual" and not normal):
-                                    alias[res] = cond_id
+                            if sc is not None and co is not None and co[2] == sc[3]:
+                                cond_id, vt, vf, _ = sc
+                                vk = co[1]
+                                eq_t = vt == vk
+                                eq_f = vf == vk
+                                if op == "OpINotEqual":
+                                    eq_t, eq_f = not eq_t, not eq_f
+                                repl = None
+                                if eq_t and eq_f:
+                                    repl = const_true_id
+                                elif (not eq_t) and (not eq_f):
+                                    repl = const_false_id
+                                elif eq_t and (not eq_f):
+                                    repl = cond_id
+                                elif (not eq_t) and eq_f:
+                                    repl = logical_not_of.get(cond_id) or not_of_bool.get(cond_id)
+                                if repl is not None:
+                                    alias[res] = repl
                                     dead_idx.add(idx)
                                     deleted_ids.add(res)
                                     changed = True
@@ -754,8 +828,9 @@ def _optimize_function(body_lines: list[str], const_ids: set[str], const_true: s
 
                     # Integer/bit constant folding & algebraic identities
                     folded = _fold_int_op(
-                        op, args[0], args, const_int_val, int_const_by_val,
-                        int_type_info, const_true_id, const_false_id,
+                        op, args[0], args, id_type, bool_type_id,
+                        const_int_val, int_const_by_val, int_type_info,
+                        const_true_id, const_false_id,
                     )
                     if folded is not None:
                         alias[res] = folded
@@ -865,7 +940,28 @@ def _optimize_function(body_lines: list[str], const_ids: set[str], const_true: s
                                 last_store.pop(s, None)
                     continue
 
-            return undo_ac, undo_val, undo_ro, undo_bc, undo_bm, undo_ce, undo_ln
+            return undo_ac, undo_val, undo_ro, undo_bc, undo_so, undo_sc, undo_ce, undo_ln, undo_nob
+
+        def rollback(undos):
+            u_ac, u_val, u_ro, u_bc, u_so, u_sc, u_ce, u_ln, u_nob = undos
+            for k in u_ac:
+                del ac_cse[k]
+            for k in u_val:
+                del val_cse[k]
+            for k in u_ro:
+                del ro_load_cse[k]
+            for k in u_bc:
+                del bitcast_of[k]
+            for k in u_so:
+                del select_of[k]
+            for k in u_sc:
+                del select_consts[k]
+            for k in u_ce:
+                del ctor_elems[k]
+            for k in u_ln:
+                del logical_not_of[k]
+            for k in u_nob:
+                del not_of_bool[k]
 
         if blocks:
             # Initial state for entry block 0.
@@ -895,42 +991,13 @@ def _optimize_function(body_lines: list[str], const_ids: set[str], const_true: s
                         else:
                             dfs.append(("enter", ch, dict(readonly_slot_val), dict(readonly_null_zero)))
                 else:
-                    undo_ac, undo_val, undo_ro, undo_bc, undo_bm, undo_ce, undo_ln = frame[1]
-                    for k in undo_ac:
-                        del ac_cse[k]
-                    for k in undo_val:
-                        del val_cse[k]
-                    for k in undo_ro:
-                        del ro_load_cse[k]
-                    for k in undo_bc:
-                        del bitcast_of[k]
-                    for k in undo_bm:
-                        del bool_mask_of[k]
-                    for k in undo_ce:
-                        del ctor_elems[k]
-                    for k in undo_ln:
-                        del logical_not_of[k]
+                    rollback(frame[1])
 
             # Process any unreachable blocks (in case spirv-val inspects them) with fresh state.
             reachable_set = set(rpo)
             for b in range(len(blocks)):
                 if b not in reachable_set:
-                    undos = process_block(b, dict(readonly_slot_val), dict(readonly_null_zero), reachable=False)
-                    undo_ac, undo_val, undo_ro, undo_bc, undo_bm, undo_ce, undo_ln = undos
-                    for k in undo_ac:
-                        del ac_cse[k]
-                    for k in undo_val:
-                        del val_cse[k]
-                    for k in undo_ro:
-                        del ro_load_cse[k]
-                    for k in undo_bc:
-                        del bitcast_of[k]
-                    for k in undo_bm:
-                        del bool_mask_of[k]
-                    for k in undo_ce:
-                        del ctor_elems[k]
-                    for k in undo_ln:
-                        del logical_not_of[k]
+                    rollback(process_block(b, dict(readonly_slot_val), dict(readonly_null_zero), reachable=False))
 
         if dead_idx:
             insts = [e for i, e in enumerate(insts) if i not in dead_idx]
@@ -946,36 +1013,251 @@ def _optimize_function(body_lines: list[str], const_ids: set[str], const_true: s
                     entry[2] = new_args
                     changed = True
 
-        # 3. Whole-function dead-slot store elimination for non-escaped, statically-indexed Function vars:
-        #    if a slot (var, ...) has zero remaining OpLoads anywhere in the function, every OpStore to it is dead.
-        if static_trackable:
-            loaded_slots: set[tuple] = set()
-            for _res, op, args, _ in insts:
-                if op == "OpLoad" and len(args) >= 2:
-                    slot = ptr_slot.get(args[1])
-                    if slot is not None and slot[0] in static_trackable:
-                        loaded_slots.add(slot)
-            dead_stores: set[int] = set()
-            for idx, (_res, op, args, _) in enumerate(insts):
-                if op == "OpStore" and len(args) >= 2:
-                    if any("Volatile" in m for m in args[2:]):
+        # 2.5 Constant OpBranchConditional folding + cleanup of unreferenced unreachable blocks.
+        if insts and (const_true or const_false):
+            blocks, _succs, all_preds, rpo, _idom, _dom_ch = _build_cfg_and_dom(insts)
+            if blocks:
+                block_label = {b: insts[b_insts[0]][0] for b, b_insts in enumerate(blocks)}
+                label_to_block = {lbl: b for b, lbl in block_label.items()}
+                loop_merge_labels: set[str] = set()
+                for b_insts in blocks:
+                    for ii in b_insts:
+                        _r, op, args, _ = insts[ii]
+                        if op == "OpLoopMerge" and len(args) >= 2:
+                            loop_merge_labels.add(args[0])
+                            loop_merge_labels.add(args[1])
+
+                dead_cf: set[int] = set()
+                phi_drop: dict[int, set[str]] = {}
+                folded_cf = False
+                touched_cf: set[int] = set()
+
+                def _phi_ok_after_drop(blk_i: int, drop_lbl: str) -> bool:
+                    for ii in blocks[blk_i]:
+                        _r, op, args, _ = insts[ii]
+                        if op == "OpPhi" and len(args) >= 3:
+                            preds_h = [args[k] for k in range(2, len(args), 2)]
+                            if drop_lbl in preds_h and not any(p != drop_lbl for p in preds_h):
+                                return False
+                    return True
+
+                for b in rpo:
+                    if b in touched_cf:
                         continue
-                    slot = ptr_slot.get(args[0])
-                    if slot is not None and slot[0] in static_trackable and slot not in loaded_slots:
-                        dead_stores.add(idx)
+                    live_b = [ii for ii in blocks[b] if insts[ii][1] is not None]
+                    if len(live_b) < 3:
+                        continue
+                    term_idx, prev_idx = live_b[-1], live_b[-2]
+                    _tr, t_op, t_args, _ = insts[term_idx]
+                    _pr, p_op, p_args, _ = insts[prev_idx]
+                    if t_op != "OpBranchConditional" or len(t_args) < 3 or p_op != "OpSelectionMerge" or not p_args:
+                        continue
+                    cond, t_lbl, f_lbl = t_args[0], t_args[1], t_args[2]
+                    if cond in const_true:
+                        taken, not_taken = t_lbl, f_lbl
+                    elif cond in const_false:
+                        taken, not_taken = f_lbl, t_lbl
+                    else:
+                        continue
+                    M = p_args[0]
+                    b_lbl = block_label[b]
+                    if taken == M:
+                        if not_taken != M:
+                            ntb = label_to_block.get(not_taken)
+                            if ntb is not None and not _phi_ok_after_drop(ntb, b_lbl):
+                                continue
+                            if ntb is not None:
+                                phi_drop.setdefault(ntb, set()).add(b_lbl)
+                        dead_cf.add(prev_idx)
+                        insts[term_idx] = [None, "OpBranch", [M], ""]
+                        touched_cf.add(b)
+                        folded_cf = True
+                        changed = True
+                    elif not_taken == M:
+                        tb = label_to_block.get(taken)
+                        mb = label_to_block.get(M)
+                        if tb is None or mb is None or tb == mb or b == tb or b == mb:
+                            continue
+                        if tb in touched_cf or mb in touched_cf or all_preds[tb] != {b}:
+                            continue
+                        live_tb = [ii for ii in blocks[tb] if insts[ii][1] is not None]
+                        if len(live_tb) < 2:
+                            continue
+                        if any(insts[ii][1] in ("OpSelectionMerge", "OpLoopMerge") for ii in live_tb):
+                            continue
+                        _ttr, tt_op, tt_args, _ = insts[live_tb[-1]]
+                        if tt_op != "OpBranch" or tt_args != [M]:
+                            continue
+                        has_phi_b = any(
+                            insts[ii][1] == "OpPhi" and b_lbl in insts[ii][2][2::2]
+                            for ii in blocks[mb]
+                        )
+                        if (M in loop_merge_labels and has_phi_b) or not _phi_ok_after_drop(mb, b_lbl):
+                            continue
+                        phi_drop.setdefault(mb, set()).add(b_lbl)
+                        dead_cf.add(prev_idx)
+                        insts[term_idx] = [None, "OpBranch", [taken], ""]
+                        touched_cf.update((b, tb, mb))
+                        folded_cf = True
+                        changed = True
+
+                if phi_drop or dead_cf:
+                    for blk_i, drop_lbls in phi_drop.items():
+                        for ii in blocks[blk_i]:
+                            entry = insts[ii]
+                            if entry[1] == "OpPhi" and len(entry[2]) >= 3:
+                                args = entry[2]
+                                kept = [args[0]]
+                                for k in range(1, len(args), 2):
+                                    if k + 1 < len(args) and args[k + 1] not in drop_lbls:
+                                        kept.extend((args[k], args[k + 1]))
+                                entry[2] = kept
+                    if dead_cf:
+                        insts = [e for i, e in enumerate(insts) if i not in dead_cf]
+
+                if folded_cf:
+                    blocks, _succs, _all_preds, rpo, _idom, _dom_ch = _build_cfg_and_dom(insts)
+                    reachable_set = set(rpo)
+                    block_label = {b: insts[b_insts[0]][0] for b, b_insts in enumerate(blocks)}
+                    dead_ub = {ub for ub in range(len(blocks)) if ub not in reachable_set}
+                    while dead_ub:
+                        dead_lbls = {block_label[ub] for ub in dead_ub}
+                        need_keep: set[str] = set()
+                        for sb in range(len(blocks)):
+                            if sb in dead_ub:
+                                continue
+                            for ii in blocks[sb]:
+                                _r, op, args, _ = insts[ii]
+                                if op == "OpPhi" and len(args) >= 3:
+                                    preds_h = [args[k] for k in range(2, len(args), 2)]
+                                    if any(p in dead_lbls for p in preds_h) and not any(p not in dead_lbls for p in preds_h):
+                                        need_keep.update(p for p in preds_h if p in dead_lbls)
+                                elif op == "OpSelectionMerge" and args and args[0] in dead_lbls:
+                                    need_keep.add(args[0])
+                                elif op == "OpLoopMerge" and len(args) >= 2:
+                                    if args[0] in dead_lbls:
+                                        need_keep.add(args[0])
+                                    if args[1] in dead_lbls:
+                                        need_keep.add(args[1])
+                                elif op == "OpBranch" and args and args[0] in dead_lbls:
+                                    need_keep.add(args[0])
+                                elif op == "OpBranchConditional" and len(args) >= 3:
+                                    if args[1] in dead_lbls:
+                                        need_keep.add(args[1])
+                                    if args[2] in dead_lbls:
+                                        need_keep.add(args[2])
+                                elif op == "OpSwitch" and len(args) >= 2:
+                                    if args[1] in dead_lbls:
+                                        need_keep.add(args[1])
+                                    for k in range(3, len(args), 2):
+                                        if args[k] in dead_lbls:
+                                            need_keep.add(args[k])
+                        if not need_keep:
+                            break
+                        dead_ub = {ub for ub in dead_ub if block_label[ub] not in need_keep}
+                    if dead_ub:
+                        dead_lbls = {block_label[ub] for ub in dead_ub}
+                        dead_blk_insts: set[int] = set()
+                        for ub in dead_ub:
+                            for ii in blocks[ub]:
+                                dead_blk_insts.add(ii)
+                                res_u = insts[ii][0]
+                                if res_u is not None:
+                                    deleted_ids.add(res_u)
+                        for sb in range(len(blocks)):
+                            if sb in dead_ub:
+                                continue
+                            for ii in blocks[sb]:
+                                entry = insts[ii]
+                                if entry[1] == "OpPhi" and len(entry[2]) >= 3:
+                                    args = entry[2]
+                                    kept = [args[0]]
+                                    for k in range(1, len(args), 2):
+                                        if k + 1 < len(args) and args[k + 1] not in dead_lbls:
+                                            kept.extend((args[k], args[k + 1]))
+                                    if len(kept) != len(args):
+                                        entry[2] = kept
+                                        changed = True
+                        insts = [e for i, e in enumerate(insts) if i not in dead_blk_insts]
+                        changed = True
+
+        # 3. Whole-function backward slot-liveness dead-store elimination for non-escaped, statically-indexed vars.
+        if static_trackable:
+            blocks, succs, _all_preds, rpo, _idom, _dom_ch = _build_cfg_and_dom(insts)
+            terminators = frozenset((
+                "OpBranch", "OpBranchConditional", "OpSwitch",
+                "OpReturn", "OpReturnValue", "OpKill", "OpTerminateInvocation", "OpUnreachable",
+            ))
+            well_formed_cfg = bool(blocks) and all(
+                any(insts[ii][1] is not None for ii in b_insts)
+                and insts[next(ii for ii in reversed(b_insts) if insts[ii][1] is not None)][1] in terminators
+                for b_insts in blocks
+            )
+            dead_stores: set[int] = set()
+            if well_formed_cfg:
+                n_blk = len(blocks)
+                use_b: list[set[tuple]] = [set() for _ in range(n_blk)]
+                def_b: list[set[tuple]] = [set() for _ in range(n_blk)]
+                for b_i, b_insts in enumerate(blocks):
+                    for ii in b_insts:
+                        _r, op, args, _ = insts[ii]
+                        if op == "OpLoad" and len(args) >= 2 and not any("Volatile" in m for m in args[2:]):
+                            slot = ptr_slot.get(args[1])
+                            if slot is not None and slot[0] in static_trackable and slot not in def_b[b_i]:
+                                use_b[b_i].add(slot)
+                        elif op == "OpStore" and len(args) >= 2 and not any("Volatile" in m for m in args[2:]):
+                            slot = ptr_slot.get(args[0])
+                            if slot is not None and slot[0] in static_trackable:
+                                def_b[b_i].add(slot)
+                live_in: list[set[tuple]] = [set(use_b[b_i]) for b_i in range(n_blk)]
+                live_out: list[set[tuple]] = [set() for _ in range(n_blk)]
+                rev_order = list(reversed(rpo)) + [b_i for b_i in range(n_blk) if b_i not in set(rpo)]
+                liveness_changed = True
+                while liveness_changed:
+                    liveness_changed = False
+                    for b_i in rev_order:
+                        out_s: set[tuple] = set()
+                        for nb in succs[b_i]:
+                            out_s |= live_in[nb]
+                        in_s = use_b[b_i] | (out_s - def_b[b_i])
+                        if out_s != live_out[b_i] or in_s != live_in[b_i]:
+                            live_out[b_i] = out_s
+                            live_in[b_i] = in_s
+                            liveness_changed = True
+                for b_i, b_insts in enumerate(blocks):
+                    live = set(live_out[b_i])
+                    for ii in reversed(b_insts):
+                        _r, op, args, _ = insts[ii]
+                        if op == "OpLoad" and len(args) >= 2 and not any("Volatile" in m for m in args[2:]):
+                            slot = ptr_slot.get(args[1])
+                            if slot is not None and slot[0] in static_trackable:
+                                live.add(slot)
+                        elif op == "OpStore" and len(args) >= 2 and not any("Volatile" in m for m in args[2:]):
+                            slot = ptr_slot.get(args[0])
+                            if slot is not None and slot[0] in static_trackable:
+                                if slot not in live:
+                                    dead_stores.add(ii)
+                                else:
+                                    live.discard(slot)
+            else:
+                loaded_slots: set[tuple] = set()
+                for _res, op, args, _ in insts:
+                    if op == "OpLoad" and len(args) >= 2:
+                        slot = ptr_slot.get(args[1])
+                        if slot is not None and slot[0] in static_trackable:
+                            loaded_slots.add(slot)
+                for idx, (_res, op, args, _) in enumerate(insts):
+                    if op == "OpStore" and len(args) >= 2:
+                        if any("Volatile" in m for m in args[2:]):
+                            continue
+                        slot = ptr_slot.get(args[0])
+                        if slot is not None and slot[0] in static_trackable and slot not in loaded_slots:
+                            dead_stores.add(idx)
             if dead_stores:
                 insts = [e for i, e in enumerate(insts) if i not in dead_stores]
                 changed = True
 
-        # 4. Backward pure Dead-Code Elimination (DCE) + dead Function-scope OpVariable removal.
-        use_count: dict[str, int] = {}
-        for _res, op, args, _ in insts:
-            if op is None or not args:
-                continue
-            for tok in args:
-                if tok.startswith("%"):
-                    use_count[tok] = use_count.get(tok, 0) + 1
-
+        # 4. Mark-and-sweep pure Dead-Code Elimination (collects dead phi cycles and unused vars).
         def is_pure_dce_candidate(res: str, op: str, args: list[str]) -> bool:
             if op in _PURE_OPS or op == "OpPhi":
                 return True
@@ -989,19 +1271,34 @@ def _optimize_function(body_lines: list[str], const_ids: set[str], const_true: s
                 return True
             return False
 
-        dce_dead: set[int] = set()
-        for idx in range(len(insts) - 1, -1, -1):
-            res, op, args, _ = insts[idx]
-            if res is None or op is None:
+        def_idx: dict[str, int] = {
+            res: idx for idx, (res, _op, _args, _raw) in enumerate(insts) if res is not None
+        }
+        live_insts: set[int] = set()
+        work: list[int] = []
+        for idx, (res, op, args, _) in enumerate(insts):
+            if (op is None or res is None or res in decorate_operand_ids
+                    or not is_pure_dce_candidate(res, op, args)):
+                live_insts.add(idx)
+                work.append(idx)
+        while work:
+            cur_i = work.pop()
+            c_args = insts[cur_i][2]
+            if not c_args:
                 continue
-            if use_count.get(res, 0) == 0 and is_pure_dce_candidate(res, op, args):
-                dce_dead.add(idx)
-                deleted_ids.add(res)
-                for tok in args:
-                    if tok.startswith("%"):
-                        use_count[tok] = use_count.get(tok, 0) - 1
+            for tok in c_args:
+                if tok.startswith("%"):
+                    di = def_idx.get(tok)
+                    if di is not None and di not in live_insts:
+                        live_insts.add(di)
+                        work.append(di)
 
+        dce_dead = {idx for idx in range(len(insts)) if idx not in live_insts}
         if dce_dead:
+            for idx in dce_dead:
+                res_d = insts[idx][0]
+                if res_d is not None:
+                    deleted_ids.add(res_d)
             insts = [e for i, e in enumerate(insts) if i not in dce_dead]
             changed = True
 
@@ -1021,11 +1318,15 @@ def optimize(spvasm: str, max_passes: int = 4) -> str:
     """Apply sound dominator-tree SPIR-V optimizations to a SPIR-V assembly module."""
     lines = spvasm.splitlines()
 
-    # Scan module header for constants, integer types, immutable globals, GLSL ext sets, decorations.
+    # Scan module header for constants, integer/float types, immutable globals, GLSL ext sets, decorations.
     const_ids: set[str] = set()
     const_true: set[str] = set()
     const_false: set[str] = set()
     const_type: dict[str, str] = {}
+    bool_type_id: str | None = None
+    float_type_width: dict[str, int] = {}                  # float_type_id -> 32 | 64
+    const_bits: dict[str, tuple[str, int, int]] = {}        # const_id -> (type_id, uval, width)
+    const_by_bits: dict[tuple[str, int], str] = {}          # (type_id, uval) -> const_id
     int_type_info: dict[str, tuple[int, int]] = {}          # int_type_id -> (width, signedness)
     const_int_val: dict[str, tuple[str, int, int, int]] = {}  # const_id -> (type_id, uval, width, signedness)
     int_const_by_val: dict[tuple[str, int], str] = {}       # (type_id, uval) -> const_id
@@ -1035,6 +1336,7 @@ def optimize(spvasm: str, max_passes: int = 4) -> str:
     readonly_global_vars: set[str] = set()                  # PushConstant and Input OpVariables
     glsl_sets: set[str] = set()
     decorated_ids: set[str] = set()
+    decorate_operand_ids: set[str] = set()
 
     func_ranges: list[tuple[int, int]] = []
     fn_start = None
@@ -1066,15 +1368,25 @@ def optimize(spvasm: str, max_passes: int = 4) -> str:
                 for tok in args[2:]:
                     if tok.startswith("%"):
                         decorated_ids.add(tok)
+                        decorate_operand_ids.add(tok)
             elif op == "OpGroupDecorate" and len(args) >= 2:
                 for tok in args[1:]:
                     if tok.startswith("%"):
                         decorated_ids.add(tok)
+            elif op == "OpTypeBool" and res and not args:
+                bool_type_id = res
             elif op == "OpTypeInt" and res and len(args) >= 2:
                 try:
                     w, s = int(args[0]), int(args[1])
                     if w in (8, 16, 32, 64):
                         int_type_info[res] = (w, s)
+                except ValueError:
+                    pass
+            elif op == "OpTypeFloat" and res and len(args) == 1:
+                try:
+                    fw = int(args[0])
+                    if fw in (32, 64):
+                        float_type_width[res] = fw
                 except ValueError:
                     pass
             elif op == "OpConstant" and res and len(args) >= 2:
@@ -1089,10 +1401,33 @@ def optimize(spvasm: str, max_passes: int = 4) -> str:
                         uval = int(args[1], 0) & ((1 << w) - 1)
                         const_int_val[res] = (args[0], uval, w, s)
                         int_const_by_val.setdefault((args[0], uval), res)
+                        if w in (32, 64):
+                            const_bits[res] = (args[0], uval, w)
+                            const_by_bits.setdefault((args[0], uval), res)
                         if uval == 0:
                             zero_const_of_type.setdefault(args[0], res)
                     except ValueError:
                         pass
+                else:
+                    fw = float_type_width.get(args[0])
+                    if fw in (32, 64):
+                        lit = args[1]
+                        try:
+                            fv = float.fromhex(lit) if lit.lower().startswith(("0x", "-0x", "+0x")) else float(lit)
+                            if math.isfinite(fv):
+                                if fw == 32:
+                                    packed = struct.pack("<f", fv)
+                                    if struct.unpack("<f", packed)[0] == fv:
+                                        ubits = struct.unpack("<I", packed)[0]
+                                        const_bits[res] = (args[0], ubits, 32)
+                                        const_by_bits.setdefault((args[0], ubits), res)
+                                else:
+                                    packed = struct.pack("<d", fv)
+                                    ubits = struct.unpack("<Q", packed)[0]
+                                    const_bits[res] = (args[0], ubits, 64)
+                                    const_by_bits.setdefault((args[0], ubits), res)
+                        except (ValueError, OverflowError):
+                            pass
             elif op == "OpConstantTrue" and res and args:
                 const_ids.add(res)
                 const_true.add(res)
@@ -1108,10 +1443,15 @@ def optimize(spvasm: str, max_passes: int = 4) -> str:
                 const_ids.add(res)
                 const_type[res] = args[0]
                 const_null_type[res] = args[0]
+            elif op in ("OpSpecConstant", "OpSpecConstantTrue", "OpSpecConstantFalse",
+                        "OpSpecConstantComposite", "OpSpecConstantOp", "OpUndef") and res and args:
+                const_type[res] = args[0]
             elif op == "OpTypeArray" and res and args:
                 array_elem_type[res] = args[0]
-            elif op == "OpVariable" and res and len(args) >= 2 and args[1] in ("PushConstant", "Input"):
-                readonly_global_vars.add(res)
+            elif op == "OpVariable" and res and args:
+                const_type[res] = args[0]
+                if len(args) >= 2 and args[1] in ("PushConstant", "Input"):
+                    readonly_global_vars.add(res)
         else:
             parsed = _parse_line(raw)
             if parsed is not None and parsed[1] == "OpFunctionEnd":
@@ -1132,9 +1472,10 @@ def optimize(spvasm: str, max_passes: int = 4) -> str:
     for start, end in func_ranges:
         new_body, deleted = _optimize_function(
             lines[start:end], const_ids, const_true, const_false,
-            const_null_elem_zero, const_type, const_int_val, int_const_by_val,
+            const_null_elem_zero, const_type, bool_type_id, float_type_width,
+            const_bits, const_by_bits, const_int_val, int_const_by_val,
             int_type_info, readonly_global_vars, glsl_sets, decorated_ids,
-            max_passes=max_passes,
+            decorate_operand_ids, max_passes=max_passes,
         )
         opt_funcs[start] = new_body
         all_deleted.update(deleted)
