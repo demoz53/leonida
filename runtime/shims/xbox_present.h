@@ -15,13 +15,13 @@
 // values are still unmeasured. The SuspendX/ResumeX slots are not in any public source.
 //
 // Slots (0-based, QueryInterface = 0) before the proxy can forward:
-//   ID3D12Device (Xbox):        SetFrameIntervalX   (output, interval, latency, flags)                    78
-//                               ScheduleFrameEventX (event, offset, reserved pointer, flags)              79
-//                               WaitFrameEventX     (event, timeout ms, reserved pointer, flags, &token)   80
-//                               GetFrameStatisticsX (token, type mask, &count, array)                     81
-//   ID3D12CommandQueue (Xbox):  PresentX (plane count, planes, params)                                    30 (older) / 32 (newer)
-//                               SuspendX (flags)                                                        slot unknown
-//                               ResumeX ()                                                              slot unknown
+//   ID3D12Device (Xbox):        SetFrameIntervalX   (output, interval, latency, flags)                    78 (0x270)
+//                               ScheduleFrameEventX (event, offset, reserved pointer, flags)              79 (0x278)
+//                               WaitFrameEventX     (event, timeout ms, reserved pointer, flags, &token)   80 (0x280)
+//                               GetFrameStatisticsX (token, type mask, &count, array)                     81 (0x288)
+//   ID3D12CommandQueue (Xbox):  SuspendX (flags)                                                        23 (0x0b8)
+//                               ResumeX ()                                                              24 (0x0c0)
+//                               PresentX (plane count, planes, params)                                    30 (older) / 32 (newer; measured 32 at 0x100)
 // The public numbers are measurements of other titles' runtimes, not of this game. The runtime version moves
 // PresentX, so neither value may be assumed; trace the game's slots.
 // The queue-side calls do not look at the queue: the Vulkan device has one VkQueue behind every D3D12 queue, and
@@ -39,6 +39,15 @@
 #include <thread>
 
 namespace rt::d3d12 {
+
+// Measured 0-based vtable slots (QueryInterface = 0).
+inline constexpr unsigned kDeviceSlotSetFrameIntervalX = 78;
+inline constexpr unsigned kDeviceSlotScheduleFrameEventX = 79;
+inline constexpr unsigned kDeviceSlotWaitFrameEventX = 80;
+inline constexpr unsigned kDeviceSlotGetFrameStatisticsX = 81;
+inline constexpr unsigned kQueueSlotSuspendX = 23;
+inline constexpr unsigned kQueueSlotResumeX = 24;
+inline constexpr unsigned kQueueSlotPresentX = 32;
 
 // Provisional (ours): D3D12XBOX_FRAME_INTERVAL_* as periods in microseconds.
 inline constexpr std::uint32_t xbox_frame_interval_30hz_us = 33333;
