@@ -273,7 +273,7 @@ class PipelineStageIsolationTest(unittest.TestCase):
 
     def test_pipelines_fails_when_spirv_index_is_missing(self) -> None:
         dummy_exe = os.path.join(self.tmp.name, "vk_pipeline_check.exe")
-        with open(dummy_exe, "w", encoding="utf-8") as f:
+        with open(dummy_exe, "w", encoding="utf-8", newline="\n") as f:
             f.write("dummy")
         with mock.patch("make_game.pipeline_check_exe", return_value=dummy_exe):
             stderr_buf = io.StringIO()
@@ -286,7 +286,7 @@ class PipelineStageIsolationTest(unittest.TestCase):
     def test_pipelines_fails_when_pipeline_check_exe_not_built_on_windows(self) -> None:
         spirv_dir = os.path.join(self.work_dir, "shaders", "spirv")
         os.makedirs(spirv_dir, exist_ok=True)
-        with open(os.path.join(spirv_dir, "index.json"), "w", encoding="utf-8") as f:
+        with open(os.path.join(spirv_dir, "index.json"), "w", encoding="utf-8", newline="\n") as f:
             f.write("{}")
 
         with mock.patch("make_game.pipeline_check_exe", return_value=None), \
@@ -301,7 +301,7 @@ class PipelineStageIsolationTest(unittest.TestCase):
     def test_pipelines_fails_when_pipeline_check_exe_not_built_on_posix(self) -> None:
         spirv_dir = os.path.join(self.work_dir, "shaders", "spirv")
         os.makedirs(spirv_dir, exist_ok=True)
-        with open(os.path.join(spirv_dir, "index.json"), "w", encoding="utf-8") as f:
+        with open(os.path.join(spirv_dir, "index.json"), "w", encoding="utf-8", newline="\n") as f:
             f.write("{}")
 
         with mock.patch("make_game.pipeline_check_exe", return_value=None), \
@@ -317,11 +317,11 @@ class PipelineStageIsolationTest(unittest.TestCase):
         spirv_dir = os.path.join(self.work_dir, "shaders", "spirv")
         os.makedirs(spirv_dir, exist_ok=True)
         index_path = os.path.join(spirv_dir, "index.json")
-        with open(index_path, "w", encoding="utf-8") as f:
+        with open(index_path, "w", encoding="utf-8", newline="\n") as f:
             f.write('{"shader_0": {}}')   # a finished translation is never empty
 
         dummy_exe = os.path.join(self.tmp.name, "vk_pipeline_check.exe")
-        with open(dummy_exe, "w", encoding="utf-8") as f:
+        with open(dummy_exe, "w", encoding="utf-8", newline="\n") as f:
             f.write("binary")
 
         expected_cache = os.path.join(self.out_dir, "pipeline_cache.bin")
@@ -392,19 +392,19 @@ class StageResumptionAndStepIsolationTest(unittest.TestCase):
         os.makedirs(os.path.join(dxbc_dir, "disasm"))
         os.makedirs(spirv_dir, exist_ok=True)
 
-        with open(os.path.join(dxbc_dir, "index.json"), "w", encoding="utf-8") as f:
+        with open(os.path.join(dxbc_dir, "index.json"), "w", encoding="utf-8", newline="\n") as f:
             f.write('[{"file": "shader.dxbc"}]')
-        with open(os.path.join(dxbc_dir, "fssm_index.json"), "w", encoding="utf-8") as f:
+        with open(os.path.join(dxbc_dir, "fssm_index.json"), "w", encoding="utf-8", newline="\n") as f:
             f.write('[{"name": "shader"}]')
         with open(os.path.join(dxbc_dir, "disasm", "shader.s"), "w", encoding="utf-8", newline="\n") as f:
             f.write("synthetic listing\n")
-        with open(os.path.join(dxbc_dir, "disasm.done"), "w", encoding="utf-8") as f:
+        with open(os.path.join(dxbc_dir, "disasm.done"), "w", encoding="utf-8", newline="\n") as f:
             f.write("test llvm-mc 21\n")
-        with open(os.path.join(spirv_dir, "index.json"), "w", encoding="utf-8") as f:
+        with open(os.path.join(spirv_dir, "index.json"), "w", encoding="utf-8", newline="\n") as f:
             f.write('{"shader": {}}')   # a bare {} is an empty merge and is translated again (translated_index_is_empty)
-        with open(os.path.join(spirv_dir, "wave64_emulate.txt"), "w", encoding="utf-8") as f:
+        with open(os.path.join(spirv_dir, "wave64_emulate.txt"), "w", encoding="utf-8", newline="\n") as f:
             f.write("off\n")
-        with open(os.path.join(spirv_dir, "translation_sources.sha256"), "w", encoding="utf-8") as f:
+        with open(os.path.join(spirv_dir, "translation_sources.sha256"), "w", encoding="utf-8", newline="\n") as f:
             f.write(make_game.translation_sources_digest() + "\n")
 
         with mock.patch("make_game.py") as mock_py, \
@@ -423,9 +423,9 @@ class StageResumptionAndStepIsolationTest(unittest.TestCase):
 
         disasm_done = os.path.join(dxbc_dir, "disasm.done")
         spirv_index = os.path.join(spirv_dir, "index.json")
-        with open(disasm_done, "w", encoding="utf-8") as f:
+        with open(disasm_done, "w", encoding="utf-8", newline="\n") as f:
             f.write("done\n")
-        with open(spirv_index, "w", encoding="utf-8") as f:
+        with open(spirv_index, "w", encoding="utf-8", newline="\n") as f:
             f.write("{}\n")
 
         fake_py_calls = []
@@ -433,10 +433,10 @@ class StageResumptionAndStepIsolationTest(unittest.TestCase):
         def fake_py(tool: str, *args: str) -> None:
             fake_py_calls.append(tool)
             if tool == "shader_carve.py":
-                with open(os.path.join(dxbc_dir, "index.json"), "w", encoding="utf-8") as f:
+                with open(os.path.join(dxbc_dir, "index.json"), "w", encoding="utf-8", newline="\n") as f:
                     f.write('[{"file": "shader.dxbc"}]')
             elif tool == "fssm_unpack.py":
-                with open(os.path.join(dxbc_dir, "fssm_index.json"), "w", encoding="utf-8") as f:
+                with open(os.path.join(dxbc_dir, "fssm_index.json"), "w", encoding="utf-8", newline="\n") as f:
                     f.write('[{"name": "shader"}]')
             elif tool == "shader_disasm.py":
                 disasm = os.path.join(dxbc_dir, "disasm")
@@ -464,16 +464,16 @@ class StageResumptionAndStepIsolationTest(unittest.TestCase):
             for mode in ("models", "textures"):
                 dest = os.path.join(assets_dir, name, mode)
                 os.makedirs(dest, exist_ok=True)
-                with open(os.path.join(dest, "manifest.json"), "w", encoding="utf-8") as f:
+                with open(os.path.join(dest, "manifest.json"), "w", encoding="utf-8", newline="\n") as f:
                     f.write("{}")
-                with open(os.path.join(dest, make_game.DECODER_RECORD), "w", encoding="utf-8") as f:
+                with open(os.path.join(dest, make_game.DECODER_RECORD), "w", encoding="utf-8", newline="\n") as f:
                     f.write(make_game.decoder_digest())
 
-        with open(os.path.join(audio_dir, "audio_manifest.json"), "w", encoding="utf-8") as f:
+        with open(os.path.join(audio_dir, "audio_manifest.json"), "w", encoding="utf-8", newline="\n") as f:
             f.write("{}")
-        with open(os.path.join(audio_dir, "ogg.done"), "w", encoding="utf-8") as f:
+        with open(os.path.join(audio_dir, "ogg.done"), "w", encoding="utf-8", newline="\n") as f:
             f.write("done\n")
-        with open(os.path.join(audio_dir, "xma.done"), "w", encoding="utf-8") as f:
+        with open(os.path.join(audio_dir, "xma.done"), "w", encoding="utf-8", newline="\n") as f:
             f.write("done\n")
 
         with mock.patch("make_game.rpf9dump") as exporter, \
@@ -486,7 +486,7 @@ class StageResumptionAndStepIsolationTest(unittest.TestCase):
             mock_run.assert_not_called()
             mock_py.assert_not_called()
 
-    def test_texture_pools_resume_only_when_their_listed_dds_files_exist(self) -> None:
+    def test_texture_pools_resume_only_when_their_listed_dds_files_are_nonempty(self) -> None:
         assets = Path(self.work_dir, "assets")
         audio = assets / "audio"
         audio.mkdir(parents=True)
@@ -504,34 +504,66 @@ class StageResumptionAndStepIsolationTest(unittest.TestCase):
             src.touch()
             (dest / "sample").mkdir(parents=True)
             (dest / "sample" / "first.dds").write_bytes(b"completed sibling")
-            (dest / "sample" / make_game.DECODER_RECORD).write_text(make_game.decoder_digest(), encoding="utf-8")
+            (dest / "sample" / make_game.DECODER_RECORD).write_text(make_game.decoder_digest(), encoding="utf-8", newline="\n")
         (pack_dest / "sample" / "second.dds").mkdir()
+        (base_dest / "sample" / "empty.dds").touch()
 
         valid = json.dumps({"Count": 2, "Textures": [{"File": "first.dds"}, {"File": None}]})
         legacy = json.dumps({"Count": 2, "Textures": [{"File": "first.dds"}, {"File": "second.dds"}]})
+        empty = json.dumps({"Count": 2, "Textures": [{"File": "first.dds"}, {"File": "empty.dds"}]})
         base_call = mock.call(["rpf9dump", "ttpf", str(base_source), str(base_dest)])
         pack_call = mock.call(["rpf9dump", "ttpf", str(pack_source), str(pack_dest)])
         def publish_catalog(cmd):
-            (Path(cmd[3]) / "sample" / "manifest.json").write_text(valid, encoding="utf-8")
+            (Path(cmd[3]) / "sample" / "manifest.json").write_text(valid, encoding="utf-8", newline="\n")
 
         for case, base_manifest, pack_manifest, expected in (
             ("complete including skipped rows", valid, valid, []),
             ("listed DDS is missing", legacy, valid, [base_call]),
             ("listed DDS is a directory", valid, legacy, [pack_call]),
+            ("listed DDS is empty", empty, valid, [base_call]),
             ("missing texture list", "{}", valid, [base_call]),
             ("incomplete row list", '{"Count": 2, "Textures": [{"File": "first.dds"}]}', valid, [base_call]),
             ("missing File field", valid, '{"Count": 1, "Textures": [{}]}', [pack_call]),
             ("incomplete JSON", valid, "{", [pack_call]),
         ):
             with self.subTest(case=case):
-                (base_dest / "sample" / "manifest.json").write_text(base_manifest, encoding="utf-8")
-                (pack_dest / "sample" / "manifest.json").write_text(pack_manifest, encoding="utf-8")
+                (base_dest / "sample" / "manifest.json").write_text(base_manifest, encoding="utf-8", newline="\n")
+                (pack_dest / "sample" / "manifest.json").write_text(pack_manifest, encoding="utf-8", newline="\n")
                 with mock.patch.object(make_game, "MODEL_ARCHIVES", ()), \
                         mock.patch.object(make_game, "rpf9dump", return_value="rpf9dump"), \
                         mock.patch.object(make_game, "run", side_effect=publish_catalog) as run, \
                         mock.patch.object(make_game, "log"), mock.patch("shutil.which", return_value=None):
                     make_game.assets(self.game_dir, self.work_dir, wav=False, jobs=1)
                 self.assertEqual(run.call_args_list, expected)
+
+    def test_ttpf_manifest_requires_nonempty_listed_dds_files(self) -> None:
+        pool_dir = os.path.join(self.tmp.name, "pool")
+        os.makedirs(pool_dir)
+        manifest = {"Count": 3, "Textures": [
+            {"File": "first.dds"}, {"File": "second.dds"},
+            {"File": None, "BCPackLimitation": "unsupported codec"},
+        ]}
+        with open(os.path.join(pool_dir, "manifest.json"), "w", encoding="utf-8", newline="\n") as f:
+            json.dump(manifest, f)
+        first = os.path.join(pool_dir, "first.dds")
+        second = os.path.join(pool_dir, "second.dds")
+        for path in (first, second):
+            with open(path, "wb") as f:
+                f.write(b"dds")
+        with mock.patch.object(make_game.os, "stat", side_effect=AssertionError("unexpected path stat")):
+            self.assertEqual(make_game.ttpf_manifest(pool_dir), manifest)
+
+        alt_case = {"Count": 2, "Textures": [{"File": "FIRST.DDS"}, {"File": "second.dds"}]}
+        with open(os.path.join(pool_dir, "manifest.json"), "w", encoding="utf-8", newline="\n") as f:
+            json.dump(alt_case, f)
+        with mock.patch.object(make_game.os, "stat", side_effect=PermissionError):
+            self.assertIsNone(make_game.ttpf_manifest(pool_dir))
+
+        with open(os.path.join(pool_dir, "manifest.json"), "w", encoding="utf-8", newline="\n") as f:
+            json.dump(manifest, f)
+        with open(second, "wb"):
+            pass
+        self.assertIsNone(make_game.ttpf_manifest(pool_dir))
 
     def test_pending_exports_refresh_the_existing_helper_once(self) -> None:
         # Built under the repo (not --work) so `dotnet -o` is not pointed at a locked remote path.
@@ -560,9 +592,9 @@ class StageResumptionAndStepIsolationTest(unittest.TestCase):
         p1 = os.path.join(self.work_dir, "m1.txt")
         p2 = os.path.join(self.work_dir, "m2.txt")
         p3 = os.path.join(self.work_dir, "nonexistent.txt")
-        with open(p1, "w", encoding="utf-8") as f:
+        with open(p1, "w", encoding="utf-8", newline="\n") as f:
             f.write("1")
-        with open(p2, "w", encoding="utf-8") as f:
+        with open(p2, "w", encoding="utf-8", newline="\n") as f:
             f.write("2")
         self.assertTrue(os.path.isfile(p1))
         self.assertTrue(os.path.isfile(p2))

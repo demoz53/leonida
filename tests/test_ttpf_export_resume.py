@@ -83,6 +83,67 @@ class TtpfExportResumeTest(unittest.TestCase):
             self.assertEqual([sibling.read_bytes(), blocked.read_bytes()], expected)
             self.assertEqual(sibling.stat().st_mtime_ns, saved_mtime)
 
+    def test_resume_repairs_empty_dds_and_keeps_siblings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pool = root / "pool.ttpf"
+            write_pool(pool)
+            out = root / "out"
+            clean = export(pool, out)
+            self.assertEqual(clean.returncode, 0, clean.stdout + clean.stderr)
+
+            folder = out / pool.stem
+            rows = textures(folder)
+            skipped, first, second = rows
+            self.assertIsNone(skipped["File"])
+            self.assertTrue(skipped["Limitation"])
+            damaged = folder / first["File"]
+            sibling = folder / second["File"]
+            original = damaged.read_bytes()
+            self.assertTrue(original)
+            sibling_bytes = sibling.read_bytes()
+            damaged.write_bytes(b"")
+            os.utime(sibling, (1_000_000_000, 1_000_000_000))
+            sibling_mtime = sibling.stat().st_mtime_ns
+
+            resumed = export(pool, out)
+            self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+            self.assertEqual(damaged.read_bytes(), original)
+            self.assertEqual(sibling.read_bytes(), sibling_bytes)
+            self.assertEqual(sibling.stat().st_mtime_ns, sibling_mtime)
+            self.assertEqual(textures(folder), rows)
+            self.assertEqual({p.name for p in folder.glob("*.dds")}, {damaged.name, sibling.name})
+
+    def test_resume_checks_dds_symlink_targets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pool = root / "pool.ttpf"
+            write_pool(pool)
+            out = root / "out"
+            clean = export(pool, out)
+            self.assertEqual(clean.returncode, 0, clean.stdout + clean.stderr)
+
+            folder = out / pool.stem
+            _, first, second = textures(folder)
+            damaged, sibling = (folder / row["File"] for row in (first, second))
+            original = damaged.read_bytes()
+            empty_target = root / "empty"
+            empty_target.touch()
+            sibling_target = root / "sibling"
+            sibling.rename(sibling_target)
+            damaged.unlink()
+            try:
+                damaged.symlink_to(empty_target)
+                sibling.symlink_to(sibling_target)
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"symlinks unavailable: {exc}")
+
+            resumed = export(pool, out)
+            self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+            self.assertEqual(damaged.read_bytes(), original)
+            self.assertEqual(empty_target.read_bytes(), b"")
+            self.assertTrue(sibling.is_symlink())
+
     def test_undecodable_texture_is_a_limitation_and_siblings_still_publish(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

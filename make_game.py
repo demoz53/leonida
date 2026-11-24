@@ -2149,12 +2149,10 @@ def rpf9dump(work: str) -> str:
 
 
 def ttpf_manifest(pool_dir: str) -> dict | None:
-    """An older exporter could publish the manifest after a failed DDS write. Check its promised files on resume."""
+    """Accept the resume manifest only when every listed DDS is a non-empty regular file."""
     try:
         with open(os.path.join(pool_dir, "manifest.json"), encoding="utf-8") as f:
             doc = json.load(f)
-        with os.scandir(pool_dir) as it:
-            have = {e.name for e in it if e.is_file()}
     except (OSError, ValueError, RecursionError):
         return None
     if not isinstance(doc, dict):
@@ -2162,18 +2160,41 @@ def ttpf_manifest(pool_dir: str) -> dict | None:
     rows, count = doc.get("Textures"), doc.get("Count")
     if not isinstance(rows, list) or type(count) is not int or count != len(rows):
         return None
+    wanted: set[str] = set()
     for row in rows:
         if not isinstance(row, dict) or "File" not in row:
             return None
         name = row["File"]
         if name is None:  # The catalog marked this texture unsupported.
             continue
-        if not isinstance(name, str):
+        if not isinstance(name, str) or name != os.path.basename(name):
             return None
-        if name not in have:
-            # An existing file may use another spelling on a case-insensitive volume.
-            if name != os.path.basename(name) or not os.path.isfile(os.path.join(pool_dir, name)):
-                return None
+        wanted.add(name)
+    if not wanted:
+        return doc
+    try:
+        with os.scandir(pool_dir) as it:
+            for entry in it:
+                if entry.name not in wanted:
+                    continue
+                try:
+                    # On Windows, DirEntry.stat() reuses FindFirstFile data for ordinary files and follows symlinks.
+                    output = entry.stat()
+                except OSError:
+                    return None
+                if not stat.S_ISREG(output.st_mode) or output.st_size == 0:
+                    return None
+                wanted.remove(entry.name)
+    except OSError:
+        return None
+    for name in wanted:
+        # An existing file may use another spelling on a case-insensitive volume.
+        try:
+            output = os.stat(os.path.join(pool_dir, name))
+        except (OSError, ValueError):
+            return None
+        if not stat.S_ISREG(output.st_mode) or output.st_size == 0:
+            return None
     return doc
 
 

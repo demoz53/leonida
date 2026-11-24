@@ -83,7 +83,7 @@ if (mode == "ttpf")
         string path = Path.Combine(outDir, name);
         string? file = t.CanExtract ? name : null, limitation = t.Limitation;
         if (!t.CanExtract) Interlocked.Increment(ref skip);
-        else if (File.Exists(path)) Interlocked.Increment(ref ok);
+        else if (HasNonemptyDds(path)) Interlocked.Increment(ref ok);
         else
         {
             try
@@ -398,6 +398,20 @@ else if (mode is "models" or "textures")
 }
 Console.WriteLine($"{mode} {baseName}: ok={ok} fail={fail} skip={skip} in {sw.Elapsed.TotalSeconds:0}s");
 return (mode == "ttpf" && fail != 0) || writeFail != 0 ? 1 : 0;
+
+static bool HasNonemptyDds(string path)
+{
+    try
+    {
+        FileSystemInfo output = new FileInfo(path);
+        if (!output.Exists) return false;
+        // FileInfo.Length can report the link's length instead of its target's length.
+        if ((output.Attributes & FileAttributes.ReparsePoint) != 0)
+            output = output.ResolveLinkTarget(returnFinalTarget: true) ?? output;
+        return output is FileInfo file && file.Exists && file.Length > 0;
+    }
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return false; }
+}
 
 // A stale marker may be read-only from an earlier interrupted run; clear the attribute so the withdraw works.
 static void WithdrawMarker(string path)
