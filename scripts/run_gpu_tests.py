@@ -286,10 +286,11 @@ def unsupported_skip(msg: str) -> str:
 
 
 def verdict_line(rc: int, msg: str) -> str:
-    """The detail of a row whose test program judges itself and prints its verdict last: that line. A program that
-    exited non-zero gets its exit status in front, as in check.py, so one that died before its verdict (exit -11 on
-    Linux, 3221225477 = 0xC0000005 on Windows) does not read as a FAIL with only its device or extension line, or
-    with no detail at all."""
+    """Report the helper's verdict, prefixed with its exit status on failure."""
+    # run_cmd appends stderr to stdout. A device banner on stderr can follow the verdict.
+    output, _, last = msg.rstrip().rpartition("\n")
+    if output and last.startswith("device: "):
+        msg = output
     return failure(rc, msg, 1) if rc else msg.splitlines()[-1] if msg else ""
 
 

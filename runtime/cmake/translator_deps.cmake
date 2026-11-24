@@ -15,6 +15,8 @@ set(LEONIDA_TRANSLATOR_DEPS
     ${_leonida_repo}/tools/gfx10_formats.json
     ${_leonida_repo}/tools/lane_masks.py
     ${_leonida_repo}/tools/mc_command.py
+    ${_leonida_repo}/tools/rdna2_decode.py
+    ${_leonida_repo}/tools/rdna2_isa_tables.py
     ${_leonida_repo}/tools/rdna2spirv.py
     ${_leonida_repo}/tools/replace_retry.py
     ${_leonida_repo}/tools/report_paths.py

@@ -97,7 +97,7 @@ class RunnerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             suite(tmp, {"case_one.py": "", "case_two.txt": "", "case_bad-name.py": "",
                         "pkg/__init__.py": "", "pkg/case_two.py": "", "plain/case_three.py": ""})
-            self.assertEqual(r.test_modules(tmp, "case_*.py"), ["case_one", "pkg.case_two"])
+            self.assertEqual(r.test_modules(tmp, "case_*.py"), ["case_one", "pkg.__init__", "pkg.case_two"])
             self.assertEqual(r.test_modules(tmp, "*"), ["case_one", "pkg.__init__", "pkg.case_two"])
 
     def test_pattern_selects_files_without_importing_excluded_modules(self):
@@ -114,7 +114,7 @@ class RunnerTest(unittest.TestCase):
                     if jobs == 1:
                         self.assertIn("Ran 4 tests", result.stderr)
                     else:
-                        self.assertIn("2 files, 4 tests, 0 files failed", result.stdout)
+                        self.assertIn("3 files, 4 tests, 0 files failed", result.stdout)
 
     def test_pattern_no_matches_is_an_error_in_both_modes(self):
         for jobs in (1, 2):
@@ -148,7 +148,32 @@ class RunnerTest(unittest.TestCase):
             suite(tmp, {"test_one.py": "", "helper.py": "", "pkg/__init__.py": "", "pkg/test_two.py": "",
                         "plain_dir/test_three.py": "", "testx.py": ""})
             # discover enters packages only, and its pattern is test*.py
-            self.assertEqual(r.test_modules(tmp), ["test_one", "testx", "pkg.test_two"])
+            self.assertEqual(r.test_modules(tmp), ["test_one", "testx", "pkg.__init__", "pkg.test_two"])
+
+    def test_package_initializer_failure_is_seen_in_both_modes(self):
+        init_fail = "import unittest\nclass T(unittest.TestCase):\n" \
+                    "    def test_fail(self): self.assertEqual(1, 2, 'init-boom')\n"
+        for jobs in (1, 2):
+            with self.subTest(jobs=jobs), tempfile.TemporaryDirectory() as tmp:
+                suite(tmp, {"helper.py": "X = 1\n", "pkg/__init__.py": init_fail, "pkg/test_child.py": PASS})
+                result = cli(tmp, "-j", str(jobs))
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("init-boom", result.stdout + result.stderr)
+                if jobs == 1:
+                    self.assertIn("Ran 3 tests", result.stderr)
+                else:
+                    self.assertIn("==== FAILED: pkg.__init__", result.stdout)
+                    self.assertIn("2 files, 3 tests, 1 files failed", result.stdout)
+
+    def test_package_initializer_runs_when_no_filename_matches_pattern(self):
+        init_fail = "import unittest\nclass T(unittest.TestCase):\n" \
+                    "    def test_fail(self): self.assertEqual(1, 2, 'init-boom')\n"
+        for jobs in (1, 2):
+            with self.subTest(jobs=jobs), tempfile.TemporaryDirectory() as tmp:
+                suite(tmp, {"helper.py": "X = 1\n", "pkg/__init__.py": init_fail, "pkg/test_child.py": PASS})
+                result = cli(tmp, "-j", str(jobs), "-p", "zzz*.py")
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("init-boom", result.stdout + result.stderr)
 
     def test_all_pass(self):
         with tempfile.TemporaryDirectory() as tmp:

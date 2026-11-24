@@ -8,7 +8,9 @@ r"""Run the translator regression suite (tests/semantic) one process per test fi
 
 `-p` / `--pattern` selects test filenames using unittest discover's glob syntax (default `test*.py`). Quote the
 pattern so the shell does not expand it. Only Python module filenames are selected, including inside packages;
-the pattern matches their basenames, not directory paths. No matching files is an error in serial and parallel runs.
+the pattern matches their basenames, not directory paths. Package `__init__.py` modules are always included,
+because discover imports them and runs any TestCase they define regardless of the pattern. No matching files is an
+error in serial and parallel runs.
 
 It runs the files `python -m unittest discover -s tests/semantic` finds (`test*.py` by default, and packages below it), each as
 `python -m unittest <module>` from that folder, so a file sees the same import path as under discover. The files can
@@ -35,15 +37,31 @@ import time
 MAX_TIMEOUT_SECONDS = 24 * 60 * 60
 
 
+def module_path(directory, module):
+    """Source path of a dotted module name, including a package's `__init__.py`."""
+    parts = module.split(".")
+    if parts[-1] == "__init__":
+        return os.path.join(directory, *parts[:-1], "__init__.py")
+    return os.path.join(directory, *parts) + ".py"
+
+
 def test_modules(directory, pattern="test*.py"):
     """Dotted names of the test modules unittest discover finds under `directory` (it enters packages only)."""
     names = []
     for base, dirs, files in os.walk(directory):
         dirs[:] = sorted(d for d in dirs if os.path.isfile(os.path.join(base, d, "__init__.py")))
         prefix = os.path.relpath(base, directory).replace(os.sep, ".")
+        # Discover imports every package below its start folder even when no filename in it matches the pattern,
+        # and loads TestCase classes defined in the package initializer. Parallel runs must see those too.
+        if prefix != "." and "__init__.py" in files:
+            init = f"{prefix}.__init__"
+            if init not in names:
+                names.append(init)
         for name in sorted(files):
             if re.fullmatch(r"[_a-z]\w*\.py", name, re.IGNORECASE) and fnmatch.fnmatch(name, pattern):
-                names.append(name[:-3] if prefix == "." else f"{prefix}.{name[:-3]}")
+                module = name[:-3] if prefix == "." else f"{prefix}.{name[:-3]}"
+                if module not in names:
+                    names.append(module)
     return names
 
 
@@ -67,7 +85,12 @@ def run_module(directory, module, verbose, timeout=None):
             out = out.decode(locale.getpreferredencoding(False), errors="replace")
         return 1, 0, out + f"\nTIMED OUT after {timeout:g} s: {module}\n"
     ran = re.search(r"^Ran (\d+) tests? in", p.stdout, re.M)
-    return p.returncode, int(ran.group(1)) if ran else 0, p.stdout
+    count = int(ran.group(1)) if ran else 0
+    # Discover imports every package initializer, but an empty one has no tests to run. It is included in the
+    # module list so parallel runs see TestCase classes when there are any; without them, it is not a failure.
+    if p.returncode == 5 and count == 0 and module.endswith(".__init__") and "NO TESTS RAN" in p.stdout:
+        return 0, 0, p.stdout
+    return p.returncode, count, p.stdout
 
 
 def main(argv=None):
@@ -94,7 +117,7 @@ def main(argv=None):
             print(f"TIMED OUT after {a.timeout:g} s: unittest discover in {directory}", file=sys.stderr)
             return 1
     # Largest files first: they tend to run longest, and one started last would set the wall time alone.
-    modules.sort(key=lambda m: -os.path.getsize(os.path.join(directory, *m.split(".")) + ".py"))
+    modules.sort(key=lambda m: -os.path.getsize(module_path(directory, m)))
     start, total, failed = time.monotonic(), 0, []
     with concurrent.futures.ThreadPoolExecutor(a.jobs) as pool:
         jobs = {pool.submit(run_module, directory, m, a.verbose, a.timeout): m for m in modules}
