@@ -1741,11 +1741,40 @@ def nan_payload_problem(px, out):
     return ""
 
 
+def interp_pair_roles_problem(px: list[tuple[float, float, float, float]], abs_tol: float) -> str:
+    """Check ps_interp_pair_roles over the 64-by-64 frame covered by the vs_ids triangle.
+
+    A p1 weights P10 and a p2 weights P20 with the value the register it names holds. The fixture is drawn
+    with the test triangle (vs_tri in scripts/run_gpu_tests.py, vs_ids in check.py: the same (-1,-1),
+    (3,-1), (-1,3) triangle with attr0 = (0,0), (2,0), (0,2) at the vertices), and the 64-by-64 frame
+    covers the [-1,1] square of it, so its barycentrics at pixel (x,y) are i = (x + 0.5) / 128,
+    j = (y + 0.5) / 128: attr0.x interpolates to 2*i = (x + 0.5) / 64 and attr0.y to 2*j =
+    (y + 0.5) / 64. The fixture's four pairs — swapped, standard, both-I, both-J — therefore come out as
+    (2j, 2i, 2i, 2j) = (v, u, u, v) with u, v those two values. A model that used the hardware weights
+    whatever register the op named would give (u, u, v, v): the first channel would not read the J its op
+    named, and the third would read J instead of the I it names."""
+    if len(px) != 64 * 64:
+        return f"expected 4096 pixels, got {len(px)}"
+    for index, pixel in enumerate(px):
+        if not all(math.isfinite(v) for v in pixel):
+            return "interpolated values contain non-finite values"
+        y, x = divmod(index, 64)
+        u, v = (x + 0.5) / 64, (y + 0.5) / 64
+        expected = (v, u, u, v)
+        if any(abs(got - want) > abs_tol for got, want in zip(pixel, expected)):
+            return f"at ({x},{y}): got {pixel}, expected {expected}"
+    return ""
+
+
 def pixel_test(tools, spirv, name):
     path = os.path.join(spirv, name + ".spv")
     if name == "ps_ij_computed" and (BARY_FALLBACK or F16_HALVES):
         # Before the .spv check: without PerVertexKHR inputs the translator refuses a computed I/J pair (no .spv).
         return Skip("SKIP (computed I/J pairs need PerVertexKHR inputs: no --bary-fallback / --f16-interp-fallback)")
+    if name == "ps_interp_pair_roles" and BARY_FALLBACK:
+        # A pair that names the coordinates the other way round is weighted with those values too, and needs
+        # the same per-vertex inputs (tools/rdna2spirv.py, interp_ij_analysis).
+        return Skip("SKIP (swapped I/J pairs need PerVertexKHR inputs: no --bary-fallback)")
     if not os.path.isfile(path):
         return f"missing {name}.spv"
     if name == "ps_cbv_modulate":
@@ -1754,7 +1783,7 @@ def pixel_test(tools, spirv, name):
         return texoff_test(tools, spirv, name)
     if name == "ps_interp_f16_high" and BARY_FALLBACK and not F16_HALVES:   # with F16_HALVES it reads decoded halves
         return Skip("SKIP (per-vertex interpolants need VK_KHR_fragment_shader_barycentric)")
-    fmt = "<4f" if name in ("ps_bary", "ps_persp_bary") else "<2I2f" if name in ("ps_flat", "ps_uniform_branch", "ps_scc_mask32") else "<4I"
+    fmt = "<4f" if name in ("ps_bary", "ps_persp_bary", "ps_interp_pair_roles") else "<2I2f" if name in ("ps_flat", "ps_uniform_branch", "ps_scc_mask32") else "<4I"
     px, out = pixels(tools, spirv, name, fmt, PIXEL_VERTEX.get(name, "vs_ids"))
     if isinstance(px, Skip):   # exit 77: the device cannot run this shader (e.g. no barycentrics)
         m = re.search(r"unsupported: .*", out)
@@ -1784,6 +1813,8 @@ def pixel_test(tools, spirv, name):
         return barycentric_problem(px, 1e-6)
     if name == "ps_persp_bary":
         return bary_persp_problem(px)
+    if name == "ps_interp_pair_roles":
+        return interp_pair_roles_problem(px, 1e-6)
     if name == "ps_flat":
         if any(not math.isfinite(v) for p in px for v in p[2:]):
             return "UVs contain non-finite values"

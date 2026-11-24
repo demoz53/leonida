@@ -46,7 +46,7 @@ from check import MESH_COMPUTE, mesh_env   # LEONIDA_MESH_COMPUTE=1: mesh shader
 from check import (WAVE32_LANE_DUMPS, WAVE32_LANE_ENV, bitmask_perm_narrow_skip, narrow_subgroup_skip,
                    unpinned_subgroup_skip, vcmpx_forms_narrow_skip, wave32_lane_skip)   # as in check.py
 from check import PIXEL_VERTEX, VINT_ENV, interp_f16_high_problem, ij_computed_problem, mandelbrot_problem   # pixel producers and checks
-from check import barycentric_problem
+from check import barycentric_problem, interp_pair_roles_problem
 from check import NAN_PAYLOAD_TEST, nan_payload_problem
 from check import GET_LOD_TESTS, STORE_WORDS, get_lod_test, store_words_problem   # TEST-184: image atomics and queries
 from check import wide_pixel_skip   # ps_w64x_readlane: judged only where the fragment stage was required 64-wide
@@ -469,6 +469,11 @@ def frame_problem(px) -> str:
 def check_bary(raw_path: str) -> tuple[bool, str]:
     problem = barycentric_problem(read_raw_rgba32f(raw_path), 1e-4)
     return not problem, problem or "4096/4096 pixels match"
+
+
+def check_interp_pair_roles(raw_path: str) -> tuple[bool, str]:
+    problem = interp_pair_roles_problem(read_raw_rgba32f(raw_path), 1e-4)
+    return not problem, problem or "4096/4096 pixels weight each axis with the register its op names"
 
 
 def check_bitmask_perm(raw_path: str, msg: str = "") -> tuple[bool | None, str]:
@@ -982,6 +987,12 @@ def run_suite(a, work: str) -> int:
             # Before the .spv check: without PerVertexKHR inputs the translator refuses a computed I/J pair, so there
             # is no .spv (the f16 fallback is on by default where PerVertexKHR doesn't compile: MoltenVK).
             results.append((name, None, "SKIP (computed I/J pairs need PerVertexKHR inputs: "
+                                        "no --bary-fallback / --f16-interp-fallback)"))
+            continue
+        if name == "ps_interp_pair_roles" and (bary_fallback() or f16_interp_fallback()):
+            # A pair that names the coordinates the other way round is modelled as a computed I/J pair
+            # (tools/rdna2spirv.py, interp_ij_analysis): the same per-vertex inputs are needed.
+            results.append((name, None, "SKIP (swapped I/J pairs need PerVertexKHR inputs: "
                                         "no --bary-fallback / --f16-interp-fallback)"))
             continue
         if not os.path.isfile(spv):
@@ -1559,6 +1570,8 @@ def run_suite(a, work: str) -> int:
             elif name == "ps_persp_bary":
                 problem = bary_persp_problem(read_raw_rgba32f(raw))
                 ok, detail = not problem, problem or "perspective-correct on every covered pixel"
+            elif name == "ps_interp_pair_roles":
+                ok, detail = check_interp_pair_roles(raw)
             elif name == "ps_bitmask_perm":
                 m = re.search(r"subgroup \d+\.\.(\d+)", msg)
                 if m and int(m.group(1)) < 32:

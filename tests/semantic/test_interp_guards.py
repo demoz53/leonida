@@ -1,26 +1,34 @@
 """SHADER-177: v_interp reads the barycentric pair through its VGPR source (I = v0, J = v1), and
 v_interp_mov_f32 names the vertex with p0 (p10/p20 would be the other two vertices). The single-lane
-model returns the attribute's own value, which is only that when the operand really holds the pair,
-so anything else is refused instead of silently translating wrong (docs/design.md, PS system inputs):
+model returns the attribute's own value, which is only that when the operand really holds a coordinate of
+the pair, so a source with no provable value is refused instead of silently translating wrong
+(docs/design.md, PS system inputs):
 
-* v_interp_p1/p2 (f32 and f16 forms) must read their OWN coordinate of the pair — p1 reads I = v0,
-  p2 reads J = v1, per op — as the hardware register or a qualifying copy: anything else, including a
-  swapped p1(v1)/p2(v0) pair or both-v0, -> Unsupported naming the register and the role (the corpus
-  has none: 117,001 v0 and 116,997 v1 over 26,503 shaders);
-* v_interp_mov_f32 with p10/p20 was refused here; it is now modelled as P1 - P0 / P2 - P0
-  (test_interp_mov_delta.py; all 6,926 in the corpus are p0);
+* v_interp_p1/p2 (f32 and f16 forms) interpolate with the value their VGPR source holds: p1 weights P10 and
+  p2 weights P20, and a source qualifies when it provably holds a coordinate of the pair — the hardware
+  register v0 (I) or v1 (J), or a qualifying copy rooted at one. A pair that names them in the other order,
+  p1(v1)/p2(v0), or with both ops naming the same one, is modelled with the values those registers hold
+  (SHADER-659: measured with runtime/test/shaders/ps_interp_pair_roles.asm on a gfx1036 iGPU and an RTX 4090,
+  docs/design.md "v_interp operand guards"). A source whose value is nothing provable — v4, v9, an unwritten
+  register — is still Unsupported naming the register and the role (the corpus has none: 117,001 v0 and 116,997
+  v1 over 26,503 shaders, and no read names the other role);
+* an opposite-role read with no partner op to take the other axis from is Unsupported: the model needs both
+  weights of the pair;
+* v_interp_mov_f32 with p10/p20 is modelled as P1 - P0 / P2 - P0 (test_interp_mov_delta.py; all 6,926 in the
+  corpus are p0); any other select is Unsupported, naming it;
 * a plain v_mov_b32 copy of the op's coordinate (rooted at v0 for p1, at v1 for p2) is still accepted,
   including a chain of copies: its single write in the whole shader is the mov, and its source v0/v1
   is itself unwritten up to the copy (a copy of an already-overwritten v0/v1 carries a computed value —
   the zero-before-copy measurement renders (0,0) on hardware — while zeroing after the copy is fine,
   the copy saved the value). One corpus shader reads its J through a copy of v1 and must keep
-  translating (bit-identical .spv);
+  translating (bit-identical .spv); a copy in the role its coordinate fits keeps the centre-interpolated
+  read and that bit-identical .spv; a copy of the *other* coordinate is weighted with that value;
 * a register written twice (the mov, then anything else) no longer qualifies — and since the
   computed-I/J model landed, a written-again register, a copy of an already-overwritten v0/v1, or a
   modified (dpp) mov is no longer refused but modelled: the operand is a value the program wrote,
   and the model weights the interpolation with the value loaded from %vgpr (Vonsek's zero-before-copy
-  row renders P0, which is exactly those loads' result). A pristine copy in the wrong role stays
-  refused: it carries no computed value to model;
+  row renders P0, which is exactly those loads' result). A copy in either role is
+  modelled with the barycentric its root holds, like the pairs above;
 * the standard forms (v0/v1 pairs, p0 mov) translate and compute exactly as before.
 
 On main (before the guards) the refused cases translated silently and passed spirv-val: the operand
@@ -114,33 +122,54 @@ class InterpPairGuards(unittest.TestCase):
         self.assertIn("OpEntryPoint Fragment", spv)
         self.assertIn("PerVertexKHR", spv)
 
-    def test_swapped_and_same_register_roles_refused(self):
-        # The roles are per op — p1 interpolates with I = v0, p2 with J = v1 — so a swapped pair
-        # (p1(v1), p2(v0)) and a both-v0 pair are refused, not silently exchanged (review: kapitche).
-        cases = {(1, 0): "v_interp_p1_f32 I source v1",
-                 (1, 1): "v_interp_p1_f32 I source v1",
-                 (0, 0): "v_interp_p2_f32 J source v0"}
-        for (i, j), msg in cases.items():
-            with self.subTest(i=i, j=j):
+    def test_swapped_and_same_register_pairs_take_the_named_weights(self):
+        # SHADER-659: p1 weights P10 and p2 weights P20 with the value their source holds, so naming the
+        # pair the other way round (or naming one coordinate twice) is the interpolation with those
+        # weights, not a refusal (measured on gfx1036 with runtime/test/shaders/ps_interp_swapped_pair.asm).
+        # attr0.z is (1, 3, 5) at the three vertices: P10 = 2, P20 = 4, and with BARY = (.25, .25, .5)
+        # the four role pairs give four different numbers.
+        bary = {"i": BARY[1], "j": BARY[2]}
+        for role in ((0, 1), (1, 0), (1, 1), (0, 0)):
+            with self.subTest(p1=role[0], p2=role[1]):
+                w1, w2 = (bary["i"] if role[0] == 0 else bary["j"],
+                          bary["i"] if role[1] == 0 else bary["j"])
+                want = VERTS0[0][2] + w1 * (VERTS0[1][2] - VERTS0[0][2]) + w2 * (VERTS0[2][2] - VERTS0[0][2])
+                spv = support.translate_lines("ps_role", [f"v_interp_p1_f32_e32 v2, v{role[0]}, attr0.z",
+                                                          f"v_interp_p2_f32_e32 v2, v{role[1]}, attr0.z",
+                                                          "exp mrt0 v2, v2, v2, v2 done vm",
+                                                          "s_endpgm"])
+                words = support.mrt0_words(spv, inputs=support.varyings(spv, {0: WORDS0}, BARY))
+                self.assertEqual(words, [f32_bits(want)] * 4)
+                # Only the pair that reads the coordinates through the registers the hardware seeded needs
+                # the per-vertex read; the standard pair keeps the interpolated input as it always did.
+                self.assertEqual("PerVertexKHR" in spv, role != (0, 1))
+
+    def test_opposite_role_read_without_its_partner_refused(self):
+        # One op of the pair alone has no weight for the other axis, so it stays a refusal (SHADER-659
+        # models pairs; unpaired reads are a separate item).
+        for op, other, msg in (("v_interp_p1_f32_e32", "p2", "v_interp_p1_f32 without its p2 partner"),
+                               ("v_interp_p2_f32_e32", "p1", "v_interp_p2_f32 without its p1 partner")):
+            src = 1 if op.startswith("v_interp_p1") else 0
+            with self.subTest(op=op):
                 with self.assertRaises(rdna2spirv.Unsupported) as cm:
-                    support.translate_lines("ps_role", [f"v_interp_p1_f32_e32 v2, v{i}, attr0.x",
-                                                       f"v_interp_p2_f32_e32 v2, v{j}, attr0.x",
-                                                       "exp mrt0 v2, v2, v2, v2 done vm",
-                                                       "s_endpgm"])
+                    support.translate_lines("ps_lonely", [f"{op} v2, v{src}, attr0.z",
+                                                         "exp mrt0 v2, v2, v2, v2 done vm",
+                                                         "s_endpgm"])
                 self.assertIn(msg, str(cm.exception))
 
-    def test_copy_root_role_enforced(self):
-        # A copy only stands in for the coordinate it is rooted at: v6 = v0 cannot feed p2's J, and
-        # v6 = v1 cannot feed p1's I (the other op of the pair reads the register it should).
-        for chain, p1, p2, msg in ((["v_mov_b32_e32 v6, v0"], "v0", "v6", "v_interp_p2_f32 J source v6"),
-                                   (["v_mov_b32_e32 v6, v1"], "v6", "v1", "v_interp_p1_f32 I source v6")):
+    def test_copy_carries_the_coordinate_its_root_holds(self):
+        # A copy of the pair stands for the coordinate its root holds, in either role: v6 = v1 gives the
+        # p1 the J weight, v6 = v0 gives the p2 the I weight (the other op of the pair still reads v1/v0).
+        for chain, p1, p2, w1, w2 in ((["v_mov_b32_e32 v6, v1"], "v6", "v1", BARY[2], BARY[2]),
+                                      (["v_mov_b32_e32 v6, v0"], "v0", "v6", BARY[1], BARY[1])):
             with self.subTest(root=chain[0]):
-                with self.assertRaises(rdna2spirv.Unsupported) as cm:
-                    support.translate_lines("ps_rolc", chain + [f"v_interp_p1_f32_e32 v2, {p1}, attr0.x",
-                                                               f"v_interp_p2_f32_e32 v2, {p2}, attr0.x",
-                                                               "exp mrt0 v2, v2, v2, v2 done vm",
-                                                               "s_endpgm"])
-                self.assertIn(msg, str(cm.exception))
+                want = VERTS0[0][2] + w1 * (VERTS0[1][2] - VERTS0[0][2]) + w2 * (VERTS0[2][2] - VERTS0[0][2])
+                spv = support.translate_lines("ps_rolc", chain + [f"v_interp_p1_f32_e32 v2, {p1}, attr0.z",
+                                                                  f"v_interp_p2_f32_e32 v2, {p2}, attr0.z",
+                                                                  "exp mrt0 v2, v2, v2, v2 done vm",
+                                                                  "s_endpgm"])
+                words = support.mrt0_words(spv, inputs=support.varyings(spv, {0: WORDS0}, BARY))
+                self.assertEqual(words, [f32_bits(want)] * 4)
 
     def test_copy_in_matching_roles_translates_and_computes(self):
         # Vonsek measurement row 1: copies of untouched v0/v1, one as a chain, feed p1's I and p2's

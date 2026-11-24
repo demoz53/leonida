@@ -511,34 +511,37 @@ class InterpF16GuardsAndRejectionsTests(unittest.TestCase):
                 "exp mrt0 v2, v2, v2, v2 done vm",
                 "s_endpgm",
             ]),
-            ("v_interp_p1lv_f16 I source v1", [
-                "v_mov_b32_e32 v10, 0",
-                "v_interp_p1lv_f16 v2, v1, attr0.x, v10",
-                "v_interp_p2_f16 v2, v1, attr0.x, v2",
-                "exp mrt0 v2, v2, v2, v2 done vm",
-                "s_endpgm",
-            ]),
-            ("v_interp_p1ll_f16 I source v1", [
-                "v_interp_p1ll_f16 v2, v1, attr0.x",
-                "v_interp_p2_f16 v2, v1, attr0.x, v2",
-                "exp mrt0 v2, v2, v2, v2 done vm",
-                "s_endpgm",
-            ]),
             # An I source holding a zeroed v0 ("v_mov v0, 0; v_mov v6, v0") is a computed I of 0, which the translator
             # models since #1545 (computed I/J barycentrics) instead of rejecting; it is no longer a bad case here.
-            ("v_interp_p2_f16 J source v0", [
-                "v_mov_b32_e32 v10, 0",
-                "v_interp_p1lv_f16 v2, v0, attr0.x, v10",
-                "v_interp_p2_f16 v2, v0, attr0.x, v2",
-                "exp mrt0 v2, v2, v2, v2 done vm",
-                "s_endpgm",
-            ]),
+            # v1 for a p1 and v0 for a p2 are modelled too since SHADER-659 (the weight is the value the named
+            # register holds) — see test_opposite_role_f16_pairs_weight_with_their_registers.
         ]
         for msg, lines in bad_cases:
             with self.subTest(msg=msg):
                 with self.assertRaises(rdna2spirv.Unsupported) as cm:
                     translate_with_flags("ps_guard_bad", lines, dxbc=PS_ATTR01_DXBC)
                 self.assertIn(msg, str(cm.exception))
+
+    def test_opposite_role_f16_pairs_weight_with_their_registers(self):
+        # SHADER-659: the f16 forms weight each axis with the value their own op's source holds, so a pair
+        # that names the coordinates the other way round, or names one of them twice, is the interpolation
+        # with those weights. attr0.x is (0, 1, 4) at the three vertices (low half), exact in f16:
+        # P10 = 1, P20 = 4, and with BARY = (.25, .25, .5) the four role pairs give 2.25, 1.5, 2.5, 1.25.
+        forms = (("v_interp_p1ll_f16", "v_interp_p2_f16", ""),
+                 ("v_interp_p1lv_f16", "v_interp_p2_f16", "v_mov_b32_e32 v10, 0"))
+        for (p1_op, p2_op, setup), roles in zip(forms, ((0, 1), (1, 0), (1, 1), (0, 0))):
+            with self.subTest(op=p1_op, roles=roles):
+                w1, w2 = (BARY[1] if roles[0] == 0 else BARY[2], BARY[1] if roles[1] == 0 else BARY[2])
+                want = w1 * 1.0 + w2 * 4.0
+                p1 = (f"v_interp_p1lv_f16 v2, v{roles[0]}, attr0.x, v10" if p1_op == "v_interp_p1lv_f16"
+                      else f"v_interp_p1ll_f16 v2, v{roles[0]}, attr0.x")
+                lines = ([setup] if setup else []) + [p1,
+                                                      f"v_interp_p2_f16 v2, v{roles[1]}, attr0.x, v2",
+                                                      "exp mrt0 v2, v2, v2, v2 done vm", "s_endpgm"]
+                spv, _ = translate_with_flags("ps_pair_roles", lines, dxbc=PS_ATTR01_DXBC)
+                attrs = {0: [(pack_f16(v, 0.0), 0, 0, 0) for v in (0.0, 1.0, 4.0)]}
+                words = support.mrt0_words(spv, inputs=support.varyings(spv, attrs, BARY))
+                self.assertEqual(words[0] & 0xFFFF, f16_bits(want))
 
     def test_p1lv_accepts_saved_copy_of_v0_even_if_v0_later_zeroed(self):
         lines = [

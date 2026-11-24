@@ -14473,9 +14473,10 @@ class Gen:
         with — p1 reads I = v0, p2 reads J = v1, per op. The model returns the attribute's interpolated value,
         which is only that when the register really holds that coordinate: the hardware register, or a plain
         v_mov copy rooted at it (self.v_interp_copy, from interp_copy_sources, which tracks each copy's root).
-        Anything else — the other coordinate, a copy rooted at the other one — is refused, not guessed at.
-        A computed-I/J site (ins["ij"], interp_ij_analysis) is exempt: its operand is a value the program
-        wrote, and attribute() weights the interpolation with that value."""
+        A source in the other role — v1 for p1, v0 for p2, or a copy rooted at the other one — is modelled by
+        interp_ij_analysis with the value the register holds (SHADER-659); a source whose value is unknown is
+        refused here, not guessed at. A computed-I/J site (ins["ij"], interp_ij_analysis) is exempt: its
+        operand is a value the program wrote, and attribute() weights the interpolation with that value."""
         if ins.get("ij") is not None:
             return      # computed-I/J site: the analysis vetted the source; attribute() weights with it
         want, role = (0, "I") if op.startswith("v_interp_p1") else (1, "J")
@@ -16860,9 +16861,13 @@ def interp_ij_analysis(insns, g):
       and the p2 loads its J fresh; the p1's own full-sum value is dead unless something reads the
       partial between the ops.
 
-    A source that is neither v0/v1 nor written is left to interp_pair_src (#1224), which refuses it at
-    emission naming the role; a plain v_mov copy of the pair (g.v_interp_copy) stays #1224's to model,
-    keeping its bit-identical .spv. Refused here (Unsupported, naming the pattern): a computed pair
+    A source whose value is unknown — neither v0/v1 nor written nor a copy rooted at one of them — is left
+    to interp_pair_src (#1224), which refuses it at emission naming the role. A source in the role its own
+    coordinate fits (v0 or a copy rooted at v0 for p1, v1 or a copy rooted at v1 for p2) also stays
+    #1224's to model, keeping its bit-identical .spv. A source that provably holds the *other* coordinate
+    (SHADER-659) is modelled here: the pair's weights are the two barycentrics swapped, which is what the
+    hardware computes from the registers the ops name (docs/design.md, "v_interp operand guards"), and the
+    prologue seeds v0/v1 from BaryCoordKHR for such a pair. Refused here (Unsupported, naming the pattern): a computed pair
     whose ops are not in one basic block (the captured I would not dominate the p2), whose shared
     partial register -- the f32 vdst, or the f16 p2's fourth operand naming the p1's vdst -- is written
     between the ops, or read between them by anything but a p2's partial operand, any computed site
@@ -16965,14 +16970,24 @@ def interp_ij_analysis(insns, g):
         return False
 
     for s in sites:
+        # SHADER-659: the operand names the weight of one axis — p1 multiplies P10 with it, p2 multiplies
+        # P20 — so the question is what the register holds, not which slot it sits in. v0 holds I, v1 holds
+        # J, and a plain copy chain rooted at one of them holds that same coordinate (interp_copy_sources
+        # guarantees the single write and an unwritten root). A site whose operand holds the *other*
+        # coordinate is a weights-of-the-coordinates site: the computed model already loads the value the
+        # register holds and weights each axis with its own operand, and the prologue seeds v0/v1 from
+        # BaryCoordKHR when a pair reads them (below). A matching-role source is left exactly as before,
+        # so a listing whose sources are the coordinates its ops weight keeps its bit-identical .spv.
+        want = 0 if s["op"] in P1 else 1
+        c = g.v_interp_copy.get(s["src"])
         if s["src"] in (0, 1):
+            s["computed"] = reaching_write(s["src"], s) or s["src"] != want
+        elif c is not None:
+            s["computed"] = c[0] != want and c[1] < s["n"]      # a copy carrying the other coordinate
+        else:
             s["computed"] = reaching_write(s["src"], s)
-        elif reaching_write(s["src"], s) and s["src"] not in g.v_interp_copy:
-            s["computed"] = True
-        # any other source is pristine: interp_pair_src (#1224) accepts it only as the op's own
-        # coordinate (v0 for p1, v1 for p2) or a plain v_mov copy rooted there — which
-        # interp_copy_sources already vetted, so such a copy keeps #1224's centre-interpolated
-        # read and its bit-identical .spv — and refuses the rest at emission, naming the role
+        # any other source is pristine: interp_pair_src (#1224) accepts it only as a coordinate it can
+        # prove the register holds, and refuses the rest at emission, naming the role
         if s["computed"] and s["op"].endswith("_f32") and g.pixel_interpolants is not None and \
                 (g.pixel_interpolants[1] >> s["attr"]) & 1:
             raise Unsupported("computed I/J on 16-bit interpolant through v_interp_*_f32")
