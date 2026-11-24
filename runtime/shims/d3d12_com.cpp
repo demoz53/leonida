@@ -835,18 +835,25 @@ public:
             return check(false);
         }
         // The record size is checked for every call: D3D12 rejects a signature whose stride cannot hold a record
-        // even when no command runs. The argument span is what the signature can walk, max_command_count * stride:
-        // the host refuses a range that ends past the buffer (`240` with stride `20` in a `256`-byte buffer), and
-        // it checks the offset itself when max_command_count is 0, where the required bytes are none.
+        // even when no command runs.
         const UINT64 record_size =
             kind == leonida::IndirectKind::draw ? sizeof(D3D12_DRAW_ARGUMENTS)
             : kind == leonida::IndirectKind::draw_indexed ? sizeof(D3D12_DRAW_INDEXED_ARGUMENTS)
             : kind == leonida::IndirectKind::dispatch ? sizeof(D3D12_DISPATCH_ARGUMENTS)
             : 0;
         if (!record_size || stride < record_size || stride % 4 != 0) return check(false);
-        if (argument_buffer_offset > arg_desc.Width ||
-            UINT64(max_command_count) > (arg_desc.Width - argument_buffer_offset) / stride)
-            return check(false);
+        // The argument range is the bytes the commands read: (max_command_count - 1) * stride + record_size, and
+        // nothing when max_command_count is 0. PC D3D12 runtimes do not agree here. Some bound max_command_count *
+        // stride and check the offset at a zero count; others (D3D12Core 10.0.26100.9818, WARP and NVIDIA alike)
+        // accept a last record that fits while its stride runs past the buffer, and any aligned offset at a zero
+        // count. The layer takes the wider rule: it is the one Vulkan's own indirect draws use, no byte outside the
+        // buffer is read, and refusing here drops the whole command list for a call a real runtime runs.
+        // d3d12_execute_indirect_validation_test lists the five cases the runtimes split on.
+        if (max_command_count) {
+            const UINT64 required = UINT64(max_command_count - 1) * stride + record_size;
+            if (argument_buffer_offset > arg_desc.Width || arg_desc.Width - argument_buffer_offset < required)
+                return check(false);
+        }
         leonida::ExecuteIndirect cmd{};
         cmd.kind = kind;
         cmd.stride = stride;

@@ -3016,13 +3016,13 @@ ReplayResult prepare(const CommandList& list, Resolve&& resolve, const ReplayFun
             const VkDeviceSize record_size = detail::indirect_record_size(ind->kind);
             if (!record_size || ind->stride < record_size || ind->stride % sizeof(std::uint32_t))
                 return ReplayResult::invalid_indirect_arguments;
-            // The span is max_count * stride, the bytes the signature can walk, as D3D12 measures it: a record that
-            // fits at the end of the buffer while its stride runs past it is refused (`240` with stride `20` in a
-            // `256`-byte buffer). A zero max_count still has to name an offset inside the buffer.
-            if (ind->argument_offset > p.binding.size ||
-                ind->max_count > (p.binding.size - ind->argument_offset) / ind->stride ||
-                !detail::indirect_range(p.binding, ind->argument_offset,
-                                        VkDeviceSize(ind->max_count) * ind->stride))
+            // The range is the bytes the commands read, (max_count - 1) * stride + record_size: the rule recording
+            // applies (d3d12_com.cpp, ExecuteIndirect) and the one vkCmdDraw*Indirect states. A zero max_count is a
+            // no-op that recording never passes on; if one arrives it reads nothing and needs no range.
+            if (ind->max_count
+                    ? !detail::indirect_range(p.binding, ind->argument_offset,
+                                              VkDeviceSize(ind->max_count - 1) * ind->stride + record_size)
+                    : (p.binding.buffer_offset | ind->argument_offset) % sizeof(std::uint32_t) != 0)
                 return ReplayResult::invalid_indirect_arguments;
             if (ind->count_buffer) {
                 const ResourceBinding* cnt = resolve(ind->count_buffer);
