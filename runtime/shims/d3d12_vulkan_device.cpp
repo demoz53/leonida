@@ -485,25 +485,6 @@ UINT view_slices(const D3D12_RESOURCE_DESC& resource, UINT first_layer, UINT lay
     return remaining ? resource.DepthOrArraySize - first_layer : layer_count;
 }
 
-namespace {
-std::atomic<int> s_texture_mip_drop{-1};
-}
-
-// Returns 0, 1, 2, or 3 from LEONIDA_TEXTURE_MIP_DROP (default 0).
-// Uses a constant-initialized atomic to avoid function-local static init guards on guest threads (RT-488).
-inline UINT configured_texture_mip_drop() {
-    int drop = s_texture_mip_drop.load(std::memory_order_relaxed);
-    if (drop >= 0) return static_cast<UINT>(drop);
-    char text[16]{};
-    size_t length = 0;
-    int parsed = 0;
-    if (getenv_s(&length, text, "LEONIDA_TEXTURE_MIP_DROP") == 0 && length > 1) {
-        parsed = std::clamp(std::atoi(text), 0, 3);
-    }
-    s_texture_mip_drop.store(parsed, std::memory_order_relaxed);
-    return static_cast<UINT>(parsed);
-}
-
 // The VkImage a texture description becomes, with its mip count already resolved (MipLevels != 0). Shared by
 // texture creation and GetResourceAllocationInfo, so the sizes reported are the sizes later allocated.
 // Keeps the optional VkImageFormatListCreateInfo alongside VkImageCreateInfo so info.pNext stays valid.
@@ -513,7 +494,6 @@ struct TextureCreateInfo {
     VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     VkImageFormatListCreateInfo format_list{VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
     std::array<VkFormat, 2> view_formats{};
-    UINT mips_dropped = 0;
 
     TextureCreateInfo(const D3D12_RESOURCE_DESC& desc, const Format& format, bool attachment_usable) {
         const bool volume = desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
@@ -523,24 +503,9 @@ struct TextureCreateInfo {
             info.flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
         info.imageType = volume ? VK_IMAGE_TYPE_3D : one_d ? VK_IMAGE_TYPE_1D : VK_IMAGE_TYPE_2D;
         info.format = format.format;
-
-        // Low-VRAM texture quality switch (LEONIDA_TEXTURE_MIP_DROP, #6043):
-        // Only drop mips for pure sampled textures (no RenderTarget, DepthStencil, or UAV):
-        const bool is_render_target = (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0;
-        const bool is_depth_stencil = (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) != 0;
-        const bool is_uav           = (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0;
-        const bool can_drop         = !is_render_target && !is_depth_stencil && !is_uav;
-
-        if (can_drop && desc.MipLevels > 1) {
-            mips_dropped = std::min<UINT>(configured_texture_mip_drop(), desc.MipLevels - 1);
-        }
-
-        const uint32_t width  = std::max(1u, static_cast<uint32_t>(desc.Width >> mips_dropped));
-        const uint32_t height = one_d ? 1u : std::max(1u, desc.Height >> mips_dropped);
-        const uint32_t depth  = volume ? std::max(1u, UINT(desc.DepthOrArraySize) >> mips_dropped) : 1u;
-
-        info.extent = {width, height, depth};
-        info.mipLevels = desc.MipLevels - mips_dropped;
+        info.extent = {std::uint32_t(desc.Width), one_d ? 1u : desc.Height,
+                       volume ? UINT(desc.DepthOrArraySize) : 1u};
+        info.mipLevels = desc.MipLevels;
         info.arrayLayers = volume ? 1 : desc.DepthOrArraySize;
         info.samples = VkSampleCountFlagBits(std::max(1u, desc.SampleDesc.Count));
         info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -1962,8 +1927,6 @@ public:
     VkImageAspectFlags aspects() const { return aspects_; }
     bool rgb96() const { return rgb96_; }                        // a 96-bit texture in an RGBA32 image
     std::uint64_t image_address() const { return image_address_; }  // what a T# names the texture by
-    UINT mips_dropped() const { return mips_dropped_; }
-    UINT image_mip_levels() const { return desc_.MipLevels > mips_dropped_ ? desc_.MipLevels - mips_dropped_ : 1; }
     VkMemoryPropertyFlags memory_flags() const { return memory_flags_; }  // of the memory type behind it
     const DeviceState& device_state() const { return device_; }
 
@@ -2314,7 +2277,6 @@ public:
         const bool one_d = desc_.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D;
         if (desc_.MipLevels == 0) desc_.MipLevels = full_mips(desc_.Width, desc_.Height, depth);
         TextureCreateInfo create(desc_, format, device_.color_attachment_usable(format.format));
-        mips_dropped_ = create.mips_dropped;
         VkImageCreateInfo& info = create.info;
         if (!castable.empty()) {
             // D3D12 always allows a view in the resource's own format, whether or not the castable list names
@@ -2384,15 +2346,14 @@ public:
         binding.depth24 = format.d24;
         binding.format = format.format;
         binding.aspects = format.aspects;
-        binding.width = info.extent.width;
-        binding.height = info.extent.height;
-        binding.mip_levels = info.mipLevels;
+        binding.width = std::uint32_t(desc_.Width);
+        binding.height = one_d ? 1u : desc_.Height;
+        binding.mip_levels = desc_.MipLevels;
         binding.array_layers = info.arrayLayers;
-        binding.depth = info.extent.depth;
+        binding.depth = depth;
         binding.volume = volume;
         binding.line = one_d;
         binding.samples = samples;
-        binding.mips_dropped = mips_dropped_;
         binding.color_attachment = (info.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0;
         binding.sampled = (info.usage & VK_IMAGE_USAGE_SAMPLED_BIT) != 0;
         binding.simultaneous_access = (desc_.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS) != 0;
@@ -2487,22 +2448,9 @@ public:
     // WriteToSubresource/ReadFromSubresource.
     HRESULT STDMETHODCALLTYPE Map(UINT subresource, const D3D12_RANGE* read, void** data) override {
         if (image_) {
-            if (subresource == leonida::all_subresources) return E_INVALIDARG;
-            const UINT orig_layers = desc_.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : desc_.DepthOrArraySize;
-            const UINT total_subresources = desc_.MipLevels * orig_layers;
-            if (subresource >= total_subresources) return E_INVALIDARG;
-            if (mips_dropped_ > 0) {
-                const UINT orig_mips = desc_.MipLevels;
-                const UINT mip = subresource % orig_mips;
-                const UINT slice = subresource / orig_mips;
-                if (mip < mips_dropped_) {
-                    return !data && cpu_visible() ? S_OK : E_INVALIDARG;
-                }
-                const UINT new_mips = desc_.MipLevels - mips_dropped_;
-                subresource = slice * new_mips + (mip - mips_dropped_);
-            }
             VkImageSubresourceRange range{};
-            return !data && cpu_visible() && leonida::image_range(binding_, subresource, range)
+            return !data && cpu_visible() && subresource != leonida::all_subresources &&
+                           leonida::image_range(binding_, subresource, range)
                        ? S_OK
                        : E_INVALIDARG;
         }
@@ -2570,44 +2518,6 @@ private:
     HRESULT cpu_copy(bool write, UINT subresource, const D3D12_BOX* box, void* data, UINT row_pitch,
                      UINT depth_pitch) {
         if (!image_ || !data) return E_INVALIDARG;
-        if (subresource == leonida::all_subresources) return E_INVALIDARG;
-        const UINT orig_layers = desc_.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : desc_.DepthOrArraySize;
-        const UINT total_subresources = desc_.MipLevels * orig_layers;
-        if (subresource >= total_subresources) return E_INVALIDARG;
-        if (mips_dropped_ > 0) {
-            const UINT orig_mips = desc_.MipLevels;
-            const UINT mip = subresource % orig_mips;
-            const UINT slice = subresource / orig_mips;
-            if (mip < mips_dropped_) {
-                if (write) return S_OK;
-                // Read from a dropped mip: zero the requested box/rows/slices across row_pitch and depth_pitch.
-                const bool volume = desc_.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
-                const bool one_d = desc_.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D;
-                const std::uint32_t width = std::max(1u, std::uint32_t(desc_.Width) >> mip);
-                const std::uint32_t height = one_d ? 1u : std::max(1u, desc_.Height >> mip);
-                const std::uint32_t depth = volume ? std::max(1u, UINT(desc_.DepthOrArraySize) >> mip) : 1u;
-                const D3D12_BOX b = box ? *box : D3D12_BOX{0, 0, 0, width, height, depth};
-                if (b.right > width || b.bottom > height || b.back > depth) return E_INVALIDARG;
-                const auto block = leonida::copy_block_format(binding_, aspects_);
-                if (!block.bytes) return E_INVALIDARG;
-                const std::uint32_t k = block.block;
-                if (b.left % k || b.top % k || (b.right % k && b.right != width) || (b.bottom % k && b.bottom != height))
-                    return E_INVALIDARG;
-                if (b.left >= b.right || b.top >= b.bottom || b.front >= b.back) return S_OK;
-                const std::uint32_t rows = (b.bottom - b.top + k - 1) / k;
-                const std::uint64_t row_bytes = std::uint64_t((b.right - b.left + k - 1) / k) * block.bytes;
-                const std::uint32_t slices = b.back - b.front;
-                auto* bytes = static_cast<std::byte*>(data);
-                for (std::uint32_t z = 0; z < slices; ++z) {
-                    for (std::uint32_t y = 0; y < rows; ++y) {
-                        std::memset(bytes + std::uint64_t(z) * depth_pitch + std::uint64_t(y) * row_pitch, 0, row_bytes);
-                    }
-                }
-                return S_OK;
-            }
-            const UINT new_mips = desc_.MipLevels - mips_dropped_;
-            subresource = slice * new_mips + (mip - mips_dropped_);
-        }
         Region r{};
         if (!region(subresource, box, r)) return E_INVALIDARG;
         if (!r.rows || !r.slices) return S_OK;  // an empty box: nothing to copy
@@ -2835,7 +2745,6 @@ private:
     // A placed buffer's heap range, held as a D3D12 placed resource holds its heap: the app may release the heap
     // first, and the range must not go to another allocation while this buffer lives.
     std::shared_ptr<const leonida::TileHeapAllocation> heap_range_;
-    UINT mips_dropped_ = 0;
 };
 
 // DXGI -> Vulkan for vertex attributes, with each element's size for D3D12_APPEND_ALIGNED_ELEMENT.
@@ -6840,25 +6749,6 @@ public:
             default:
                 log_once("shader-resource view dimension not supported:", desc->ViewDimension);
                 return;
-            }
-        }
-        if (r->mips_dropped() > 0) {
-            const UINT drop = r->mips_dropped();
-            if (view.first_mip >= drop) {
-                view.first_mip -= drop;
-            } else {
-                const UINT dropped_from_view = drop - view.first_mip;
-                view.first_mip = 0;
-                if (view.mip_count != UINT_MAX) {
-                    view.mip_count = (view.mip_count > dropped_from_view) ? (view.mip_count - dropped_from_view) : 1;
-                }
-            }
-            const UINT avail_mips = r->image_mip_levels() > view.first_mip ? (r->image_mip_levels() - view.first_mip) : 1;
-            if (view.mip_count != UINT_MAX && view.mip_count > 0) {
-                view.mip_count = std::min(view.mip_count, avail_mips);
-            }
-            if (view.min_lod > 0.0f) {
-                view.min_lod = std::max(0.0f, view.min_lod - float(drop));
             }
         }
         write_image_descriptor(*r, view, destination, false);

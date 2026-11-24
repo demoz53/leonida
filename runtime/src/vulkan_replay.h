@@ -64,7 +64,6 @@ struct ResourceBinding {
     std::uint32_t height = 1;
     std::uint32_t mip_levels = 1;
     std::uint32_t array_layers = 1;
-    std::uint32_t mips_dropped = 0;
     bool presentable = false;          // a swapchain image: common/present maps to PRESENT_SRC_KHR
     bool simultaneous_access = false;  // D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS: always GENERAL
     bool not_zeroed = false;           // D3D12_HEAP_FLAG_CREATE_NOT_ZEROED: first use skips the zero fill
@@ -1681,35 +1680,9 @@ inline bool copy_subresource(const ResourceBinding& resource, std::uint32_t subr
 // Block-compressed footprints are padded to whole blocks; the Vulkan extent stops at the mip edge.
 inline ReplayResult prepare_texture_copy(const CopyTexture& copy, Prepared& p) {
     if (!copy.dst.footprint && !copy.src.footprint) {
-        std::uint32_t dst_sub = copy.dst.subresource;
-        std::uint32_t src_sub = copy.src.subresource;
-        if (p.binding.mips_dropped > 0) {
-            const std::uint32_t orig_mips = p.binding.mip_levels + p.binding.mips_dropped;
-            const std::uint32_t total = orig_mips * p.binding.array_layers;
-            if (dst_sub == all_subresources || dst_sub >= total) return ReplayResult::invalid_subresource;
-            const std::uint32_t mip = dst_sub % orig_mips;
-            const std::uint32_t slice = dst_sub / orig_mips;
-            if (mip < p.binding.mips_dropped) {
-                p.skip = true;
-                return ReplayResult::success;
-            }
-            dst_sub = slice * p.binding.mip_levels + (mip - p.binding.mips_dropped);
-        }
-        if (p.source.mips_dropped > 0) {
-            const std::uint32_t orig_mips = p.source.mip_levels + p.source.mips_dropped;
-            const std::uint32_t total = orig_mips * p.source.array_layers;
-            if (src_sub == all_subresources || src_sub >= total) return ReplayResult::invalid_subresource;
-            const std::uint32_t mip = src_sub % orig_mips;
-            const std::uint32_t slice = src_sub / orig_mips;
-            if (mip < p.source.mips_dropped) {
-                p.skip = true;
-                return ReplayResult::success;
-            }
-            src_sub = slice * p.source.mip_levels + (mip - p.source.mips_dropped);
-        }
         VkImageSubresourceRange dst{}, src{};
-        if (!copy_subresource(p.binding, dst_sub, dst) ||
-            !copy_subresource(p.source, src_sub, src))
+        if (!copy_subresource(p.binding, copy.dst.subresource, dst) ||
+            !copy_subresource(p.source, copy.src.subresource, src))
             return ReplayResult::invalid_subresource;
         if ((dst.aspectMask != src.aspectMask && !depth_colour_pair(p.binding, p.source)) ||
             p.binding.volume != p.source.volume || p.binding.samples != p.source.samples ||
@@ -1834,23 +1807,8 @@ inline ReplayResult prepare_texture_copy(const CopyTexture& copy, Prepared& p) {
     const CopyLocation& texture = upload ? copy.dst : copy.src;
     const CopyLocation& placed = upload ? copy.src : copy.dst;
     if (!buffer.buffer) return ReplayResult::invalid_copy;
-
-    std::uint32_t tex_sub = texture.subresource;
-    if (image.mips_dropped > 0) {
-        const std::uint32_t orig_mips = image.mip_levels + image.mips_dropped;
-        const std::uint32_t total = orig_mips * image.array_layers;
-        if (tex_sub == all_subresources || tex_sub >= total) return ReplayResult::invalid_subresource;
-        const std::uint32_t mip = tex_sub % orig_mips;
-        const std::uint32_t slice = tex_sub / orig_mips;
-        if (mip < image.mips_dropped) {
-            p.skip = true;
-            return ReplayResult::success;
-        }
-        tex_sub = slice * image.mip_levels + (mip - image.mips_dropped);
-    }
-
     VkImageSubresourceRange range{};
-    if (!copy_subresource(image, tex_sub, range)) return ReplayResult::invalid_subresource;
+    if (!copy_subresource(image, texture.subresource, range)) return ReplayResult::invalid_subresource;
     if (image.samples != 1) return ReplayResult::invalid_copy;  // multisampled textures have no footprint
     const BlockFormat format = copy_block_format(image, range.aspectMask);
     // A 12-byte texel does not divide D3D12's 256-byte pitches; an rgb96 copy hands Vulkan the scratch buffer of
@@ -2695,23 +2653,8 @@ ReplayResult prepare(const CommandList& list, Resolve&& resolve, const ReplayFun
             if (p.binding.image == VK_NULL_HANDLE) {
                 if (transition->subresource != 0 && transition->subresource != all_subresources)
                     return ReplayResult::invalid_subresource;
-            } else {
-                std::uint32_t sub = transition->subresource;
-                if (p.binding.mips_dropped > 0 && sub != all_subresources) {
-                    const std::uint32_t orig_mips = p.binding.mip_levels + p.binding.mips_dropped;
-                    const std::uint32_t total = orig_mips * p.binding.array_layers;
-                    if (sub >= total) return ReplayResult::invalid_subresource;
-                    const std::uint32_t mip = sub % orig_mips;
-                    const std::uint32_t slice = sub / orig_mips;
-                    if (mip < p.binding.mips_dropped) {
-                        p.skip = true;
-                        continue;
-                    }
-                    sub = slice * p.binding.mip_levels + (mip - p.binding.mips_dropped);
-                }
-                if (!image_range(p.binding, sub, p.range)) {
-                    return ReplayResult::invalid_subresource;
-                }
+            } else if (!image_range(p.binding, transition->subresource, p.range)) {
+                return ReplayResult::invalid_subresource;
             }
         } else if (std::holds_alternative<GlobalBarrier>(command) || std::holds_alternative<BufferBarrier>(command)) {
             if (!vk.pipeline_barrier2) return ReplayResult::unsupported;
@@ -2720,39 +2663,7 @@ ReplayResult prepare(const CommandList& list, Resolve&& resolve, const ReplayFun
         } else if (const auto* texture = std::get_if<TextureBarrier>(&command)) {
             if (!vk.pipeline_barrier2) return ReplayResult::unsupported;
             if (!bind(texture->resource)) return ReplayResult::unresolved_resource;
-            BarrierSubresourceRange range = texture->range;
-            if (p.binding.mips_dropped > 0 && range.index_or_first_mip != all_subresources) {
-                const std::uint32_t orig_mips = p.binding.mip_levels + p.binding.mips_dropped;
-                if (range.mip_count == 0) {
-                    const std::uint32_t total = orig_mips * p.binding.array_layers;
-                    if (range.index_or_first_mip >= total) return ReplayResult::invalid_subresource;
-                    const std::uint32_t mip = range.index_or_first_mip % orig_mips;
-                    const std::uint32_t slice = range.index_or_first_mip / orig_mips;
-                    if (mip < p.binding.mips_dropped) {
-                        p.skip = true;
-                        continue;
-                    }
-                    range.index_or_first_mip = slice * p.binding.mip_levels + (mip - p.binding.mips_dropped);
-                } else {
-                    const std::uint32_t first_mip = range.index_or_first_mip;
-                    const std::uint32_t count = range.mip_count;
-                    if (first_mip >= orig_mips || count > orig_mips - first_mip)
-                        return ReplayResult::invalid_subresource;
-                    if (first_mip + count <= p.binding.mips_dropped) {
-                        p.skip = true;
-                        continue;
-                    }
-                    if (first_mip < p.binding.mips_dropped) {
-                        const std::uint32_t dropped_from_range = p.binding.mips_dropped - first_mip;
-                        range.index_or_first_mip = 0;
-                        range.mip_count = (count > dropped_from_range) ? (count - dropped_from_range) : 1;
-                    } else {
-                        range.index_or_first_mip = first_mip - p.binding.mips_dropped;
-                    }
-                    range.mip_count = std::min(range.mip_count, p.binding.mip_levels - range.index_or_first_mip);
-                }
-            }
-            if (!p.binding.image || !barrier_range(p.binding, range, p.range))
+            if (!p.binding.image || !barrier_range(p.binding, texture->range, p.range))
                 return ReplayResult::invalid_subresource;
         } else if (const auto* color_clear = std::get_if<ClearRenderTarget>(&command)) {
             if (!bind(color_clear->target.resource)) return ReplayResult::unresolved_resource;
@@ -3624,7 +3535,6 @@ inline void emit(const PreparedList& prepared, VkCommandBuffer command_buffer, c
             command);
 
         if (const auto* transition = std::get_if<TransitionBarrier>(&command)) {
-            if (p.skip) continue;
             const VulkanAccess from = vulkan_access(transition->before, p.binding.presentable, predicates);
             const VulkanAccess to = vulkan_access(transition->after, p.binding.presentable, predicates);
             if (!p.binding.image) {
@@ -3678,7 +3588,6 @@ inline void emit(const PreparedList& prepared, VkCommandBuffer command_buffer, c
             dependency.pMemoryBarriers = &barrier;
             vk.pipeline_barrier2(command_buffer, &dependency);
         } else if (const auto* texture = std::get_if<TextureBarrier>(&command)) {
-            if (p.skip) continue;
             const auto range = detail::planes_for_layout(p.binding, p.range, separate);
             const bool discard = (texture->flags & texture_barrier_discard) ||
                                  texture->layout_before == d3d12_layout::undefined;
@@ -3848,7 +3757,6 @@ inline void emit(const PreparedList& prepared, VkCommandBuffer command_buffer, c
             });
         } else if (std::holds_alternative<CopyBuffer>(command) || std::holds_alternative<CopyTexture>(command) ||
                    std::holds_alternative<CopyResource>(command)) {
-            if (p.skip) continue;
             const auto [dst_id, src_id] = copy_ids(command);
             if (!p.predicated_copy.empty()) {
                 end_statistics();
