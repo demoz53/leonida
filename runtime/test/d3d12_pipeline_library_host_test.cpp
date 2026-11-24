@@ -3,9 +3,9 @@
 // corrupt blobs, the other device's serialized blob, the null-output capability check and other interfaces, and on
 // an empty library StorePipeline / LoadComputePipeline / LoadGraphicsPipeline / LoadPipeline with null, empty and
 // unknown names and null PSOs, descriptions or outputs, and Serialize with null, short and long buffers. Every HRESULT
-// is recorded, with whether the output pointer was written; the two records must be the same, step by step. The
-// serialized size and bytes are each device's own format and are not compared. A step the host runtime faults on is
-// reported and not compared. No shaders or game data. Skips (77) without a Vulkan GPU; without a host D3D12 device
+// and output pointer state are recorded. The public argument checks must agree step by step. Serialized sizes and
+// the result of changing a trailing byte are reported for each device's own format. Host faults are reported
+// separately. No shaders or game data. Skips (77) without a Vulkan GPU. Without a host D3D12 device,
 // only the layer's own record is printed. Set LEONIDA_D3D49_VERBOSE=1 to print every step.
 #include "vk_test_device.h"
 #include "../shims/d3d12_com.h"
@@ -105,7 +105,8 @@ const Step kSteps[] = {
          longer.resize(longer.size() + 64, 0);
          return create(c, longer.data(), longer.size());
      }},
-    {"create: its own blob, last byte flipped", [](Context& c) {
+    // The last byte is reserved in the layer's header. On the host, it depends on the driver's format.
+    {"create: its own blob, last byte flipped [own format]", [](Context& c) {
          std::vector<std::uint8_t> flipped(c.own);
          flipped.back() ^= 0xFF;
          return create(c, flipped.data(), flipped.size());
