@@ -120,6 +120,9 @@ public:
     bool request_debug_utils = false;  // set before create(): enable VK_EXT_debug_utils when the loader has it
     bool request_buffer_device_address = false;  // set before create(): enable bufferDeviceAddress where supported
     bool buffer_device_address = false;  // enabled: buffer() memory and buffers can be addressed (device_address())
+    bool request_multi_draw_indirect = true;  // set false before initialize() to test without multiDrawIndirect
+    bool request_draw_indirect_count = true;  // set false before initialize() to test without drawIndirectCount
+    bool draw_indirect_count = false;         // Vulkan 1.2 drawIndirectCount enabled
     bool conservative_rasterization = false; // VK_EXT_conservative_rasterization enabled where available
     bool request_mesh_shader = false;  // set before create(): enable VK_EXT_mesh_shader (meshShader) where available
     bool mesh_shader = false;          // VK_EXT_mesh_shader and meshShader are enabled
@@ -403,6 +406,8 @@ public:
         enable12.descriptorBindingPartiallyBound = partially_bound;
         sampler_filter_minmax = features12.samplerFilterMinmax == VK_TRUE;
         enable12.samplerFilterMinmax = sampler_filter_minmax;
+        draw_indirect_count = request_draw_indirect_count && features12.drawIndirectCount == VK_TRUE;
+        enable12.drawIndirectCount = draw_indirect_count ? VK_TRUE : VK_FALSE;
         enable12.bufferDeviceAddress = VK_TRUE;
 
         const std::uint32_t graphics_count = std::max(1u, std::min(queue_count_wanted, family_queue_count));
@@ -439,6 +444,7 @@ public:
         enable.shaderStorageImageArrayDynamicIndexing = bindless;
         enable.logicOp = features.features.logicOp;  // d3d12_draw_test's logic-op draw, where available
         enable.depthBounds = features.features.depthBounds;  // d3d12_depth_bounds_test, where available
+        enable.multiDrawIndirect = request_multi_draw_indirect ? features.features.multiDrawIndirect : VK_FALSE;
         enable.geometryShader = features.features.geometryShader;  // d3d12_geometry_test, where available
         enable.shaderInt64 = features.features.shaderInt64;  // translated shaders declare Int64 for their addresses
         const char* conditional_extension = VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME;
