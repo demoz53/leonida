@@ -16,6 +16,7 @@ post counts and pass/fail lines there, never game shaders, logs or private paths
 | NVIDIA GeForce RTX 3080 (Ampere, GA102, 10 GB GDDR6X), subgroup 32..32 | NVIDIA 580.178.04, Vulkan 1.4.312, Ubuntu 26.04 LTS | `d2cd6c0` | not run | not run | 197/248 passed, 49 skipped, 2 failed (native); 229/248 passed, 17 skipped, 2 failed (`LEONIDA_W64_EMULATE=1`) | `cs_imgload_tfe`, `cs_imgload_d16_tfe` (#31; see #280) | [local note](../gpu-test-results/RTX3080.txt) |
 | AMD Radeon 780M (RDNA3 iGPU, gfx1103), subgroup 32..64 | AMD proprietary 26.10.2 (LLPC), Vulkan 1.4.359, Windows 11 10.0.29712 | `9ec34cdf` | 257/257 translated and valid | not run separately (run_gpu_tests.py below) | 228/248 passed, 16 skipped, 4 failed | `cs_w32_exec_computed`, `cs_w64_exec_computed` (#15), `cs_imgload_tfe`, `cs_imgload_d16_tfe` (#31) | [local note](../gpu-test-results/780M.txt) |
 | NVIDIA GeForce RTX 3060 (Ampere, GA106), subgroup 32..32 | NVIDIA 621.35, Vulkan 1.4.357, Windows 11 26300 | `8f481cf` | not run | not run | 81/97 passed, 16 skipped (native); 97/97 passed (`LEONIDA_W64_EMULATE=1`, `--disasm-dir`) | none | [local note](../gpu-test-results/RTX3060.txt) |
+| NVIDIA GeForce RTX 4060 Ti (Ada, AD106), subgroup 32..32 | NVIDIA 610.88, Vulkan 1.4.341, Windows 11 26300.9974 | `8f481cf` | run via run_gpu_tests.py | run via run_gpu_tests.py | 197/248 passed, 49 skipped (native); 229/248 passed, 17 skipped (`LEONIDA_W64_EMULATE=1`) | `cs_imgload_tfe`, `cs_imgload_d16_tfe` (#31) | [local note](../gpu-test-results/RTX4060Ti.txt) |
 
 ## AMD Radeon RX 9070 GRE — 2026-11-23
 
@@ -166,3 +167,21 @@ high. The exec_computed pair is #15 and returns the same words as the CPU interp
 
 AI-assisted (MiniMax Code): built `main` at `9ec34cdf`, ran `run_gpu_tests.py` on this GPU, and reran the
 suite on its own to confirm the four failures.
+## NVIDIA GeForce RTX 4060 Ti — 2026-11-24
+
+GPU:        NVIDIA GeForce RTX 4060 Ti (Ada / AD106, PCI 10de:2805), subgroup 32..32
+Driver:     NVIDIA 610.88 (Windows driver 32.0.16.1088), Vulkan 1.4.341
+OS:         Windows 11, 10.0.26300.9974
+Commit:     8f481cf16 (main, 2026-11-24)
+            native: 197/248 passed, 49 skipped, 2 failed
+            LEONIDA_W64_EMULATE=1: 229/248 passed, 17 skipped, 2 failed
+Failed:     cs_imgload_tfe, cs_imgload_d16_tfe (#31)
+
+The device has no 64-wide subgroup. Natively, the 33 wave64 tests skip; under `LEONIDA_W64_EMULATE=1` all but the
+64-wide fragment one run and pass. The other 16 skips are the documented "run by d3d12_*_test / w64_graphics.py"
+cases. On the same checkout `ctest` passed 302/303: `d3d12_execute_indirect_validation` fails 5 parity cases on this
+host's D3D12 runtime (10.0.26100.9818), and #337 makes it 303/303. The full record is in
+[`gpu-test-results/RTX4060Ti.txt`](../gpu-test-results/RTX4060Ti.txt).
+
+AI-assisted (Claude Code): built `main` at `8f481cf`, ran `run_gpu_tests.py` native and emulated, `ctest` and the
+translator suite on this GPU.
