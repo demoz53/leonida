@@ -211,7 +211,7 @@ NOOPS = {"s_sleep", "v_nop", "v_pipeflush", "s_nop", "s_inst_prefetch", "s_endpg
 F2 = {"v_add_f32": "OpFAdd", "v_sub_f32": "OpFSub", "v_mul_f32": "OpFMul",
       "v_max_f32": "max", "v_min_f32": "min"}
 U2 = {"v_add_nc_u32": "OpIAdd", "v_sub_nc_u32": "OpISub", "v_and_b32": "OpBitwiseAnd", "v_or_b32": "OpBitwiseOr",
-      "v_xor_b32": "OpBitwiseXor", "v_mul_u32_u24": "mul24"}
+      "v_xor_b32": "OpBitwiseXor"}
 SHIFT_REV = {"v_lshlrev_b32": "OpShiftLeftLogical", "v_lshrrev_b32": "OpShiftRightLogical",
              "v_ashrrev_i32": "OpShiftRightArithmetic"}
 F1 = {"v_rcp_f32": "rcp", "v_rsq_f32": "InverseSqrt", "v_sqrt_f32": "Sqrt", "v_exp_f32": "Exp2",
@@ -8870,17 +8870,26 @@ class Gen:
                 self.emit(f"{s} = OpUMulExtended %umul {xs} {ys}")
                 self.emit(f"{r} = OpCompositeExtract %uint {s} 1")
             self.dst(a[0], r)
-        elif op in ("v_mul_i32_i24", "v_mad_i32_i24"):
-            # signed 24-bit operands (sign-extended from bit 23), low 32 bits of the product (+ src2 for mad)
+        elif op in ("v_mul_i32_i24", "v_mul_u32_u24", "v_mad_i32_i24", "v_mad_u32_u24"):
+            # 24-bit operands (sign-extended from bit 23 for i24, zero-extended for u24); low 32 bits of the
+            # product (+ src2 for mad) by default, or saturated to [INT32_MIN, INT32_MAX] / [0, UINT32_MAX]
+            # from the exact widened 64-bit value under VOP3 clamp (measured natively on gfx1036).
+            signed = op.endswith("_i24")
             x, y = self.src_u(a[1]), self.src_u(a[2])
-            xs, ys, r = self.tmp(), self.tmp(), self.tmp()
-            self.emit(f"{xs} = OpBitFieldSExtract %uint {x} {self.cu(0)} {self.cu(24)}")
-            self.emit(f"{ys} = OpBitFieldSExtract %uint {y} {self.cu(0)} {self.cu(24)}")
-            self.emit(f"{r} = OpIMul %uint {xs} {ys}")
-            if op == "v_mad_i32_i24":
-                r2 = self.tmp()
-                self.emit(f"{r2} = OpIAdd %uint {r} {self.src_u(a[3])}")
-                r = r2
+            xs, ys = self.tmp(), self.tmp()
+            ext = "OpBitFieldSExtract" if signed else "OpBitFieldUExtract"
+            self.emit(f"{xs} = {ext} %uint {x} {self.cu(0)} {self.cu(24)}")
+            self.emit(f"{ys} = {ext} %uint {y} {self.cu(0)} {self.cu(24)}")
+            acc = self.src_u(a[3]) if op.startswith("v_mad_") else None
+            if "clamp" in mods:
+                r = self.clamp_mul24(xs, ys, acc, signed)
+            else:
+                r = self.tmp()
+                self.emit(f"{r} = OpIMul %uint {xs} {ys}")
+                if acc is not None:
+                    total = self.tmp()
+                    self.emit(f"{total} = OpIAdd %uint {r} {acc}")
+                    r = total
             self.dst(a[0], r)
         elif op == "v_lerp_u8":
             if "clamp" in mods:
@@ -12210,26 +12219,19 @@ class Gen:
                         return
             r = self.tmp()
             kind = U2.get(op) or S2.get(op)
-            if kind == "mul24":
-                x, y = self.src_u(a[1]), self.src_u(a[2])
-                xm, ym = self.tmp(), self.tmp()
-                self.emit(f"{xm} = OpBitwiseAnd %uint {x} {self.cu(0xFFFFFF)}")
-                self.emit(f"{ym} = OpBitwiseAnd %uint {y} {self.cu(0xFFFFFF)}")
-                self.emit(f"{r} = OpIMul %uint {xm} {ym}")
-            else:
-                if op in ("s_lshl_b32", "s_lshr_b32"):
-                    y_val = self.imm_val(a[2])
-                    if y_val is not None:
-                        y = self.cu(y_val & 31)
-                    else:
-                        y_raw = self.src_u(a[2])
-                        m = self.tmp()
-                        self.emit(f"{m} = OpBitwiseAnd %uint {y_raw} {self.cu(31)}")
-                        y = m
-                    x = self.src_u(a[1])
+            if op in ("s_lshl_b32", "s_lshr_b32"):
+                y_val = self.imm_val(a[2])
+                if y_val is not None:
+                    y = self.cu(y_val & 31)
                 else:
-                    x, y = self.sop2_b32_srcs(op, a)     # lane-mask sources as mask_src (s_and/or_b32 on EXEC)
-                self.emit(f"{r} = {kind} %uint {x} {y}")
+                    y_raw = self.src_u(a[2])
+                    m = self.tmp()
+                    self.emit(f"{m} = OpBitwiseAnd %uint {y_raw} {self.cu(31)}")
+                    y = m
+                x = self.src_u(a[1])
+            else:
+                x, y = self.sop2_b32_srcs(op, a)     # lane-mask sources as mask_src (s_and/or_b32 on EXEC)
+            self.emit(f"{r} = {kind} %uint {x} {y}")
             self._store_b32_mask_dst(a[0], r, to_mask_dst, dst_half)
             if op in ("s_and_b32", "s_or_b32"):
                 self.scc_logic(a, r)
@@ -12447,14 +12449,6 @@ class Gen:
                 self.emit(f"{clamped} = OpSelect %uint {is_ov} {sat} {total}")
                 total = clamped
             self.dst(a[0], total)
-        elif op == "v_mad_u32_u24":
-            x, y, z = (self.src_u(t) for t in a[1:4])
-            xm, ym, p, r = self.tmp(), self.tmp(), self.tmp(), self.tmp()
-            self.emit(f"{xm} = OpBitwiseAnd %uint {x} {self.cu(0xFFFFFF)}")
-            self.emit(f"{ym} = OpBitwiseAnd %uint {y} {self.cu(0xFFFFFF)}")
-            self.emit(f"{p} = OpIMul %uint {xm} {ym}")
-            self.emit(f"{r} = OpIAdd %uint {p} {z}")
-            self.dst(a[0], r)
         elif op == "v_cndmask_b32":
             # e32: dst, src0, src1 (vcc) ; e64: dst, src0, src1, sN[:N+1]/vcc. A bit move: the e64 abs/neg source
             # modifiers are sign-bit moves, never float ops (see src_u_sign_mods).
@@ -13848,6 +13842,44 @@ class Gen:
             self.emit(f"{nz} = OpINotEqual %bool {b} {self.cu(0)}")
             flags.append(nz)
         return flags
+
+    def clamp_mul24(self, x, y, acc, signed):
+        """Saturate a widened 24-bit product, with an optional 32-bit addend."""
+        product, low, high = (self.tmp() for _ in range(3))
+        if signed:
+            sl, sh = self.tmp(), self.tmp()
+            self.emit(f"{product} = OpSMulExtended %smul {self.as_int(x)} {self.as_int(y)}")
+            self.emit(f"{sl} = OpCompositeExtract %int {product} 0")
+            self.emit(f"{sh} = OpCompositeExtract %int {product} 1")
+            self.emit(f"{low} = OpBitcast %uint {sl}")
+            self.emit(f"{high} = OpBitcast %uint {sh}")
+            self.uses_smul = True
+        else:
+            self.emit(f"{product} = OpUMulExtended %umul {x} {y}")
+            self.emit(f"{low} = OpCompositeExtract %uint {product} 0")
+            self.emit(f"{high} = OpCompositeExtract %uint {product} 1")
+        if acc is not None:
+            pair, total, carry, upper = (self.tmp() for _ in range(4))
+            self.emit(f"{pair} = OpIAddCarry %umul {low} {acc}")
+            self.emit(f"{total} = OpCompositeExtract %uint {pair} 0")
+            self.emit(f"{carry} = OpCompositeExtract %uint {pair} 1")
+            self.emit(f"{upper} = OpIAdd %uint {high} {carry}")
+            low, high = total, upper
+            if signed:
+                sign, extended = self.tmp(), self.tmp()
+                self.emit(f"{sign} = OpShiftRightArithmetic %uint {acc} {self.cu(31)}")
+                self.emit(f"{extended} = OpIAdd %uint {upper} {sign}")
+                high = extended
+        upper_if_fit, limit = self.cu(0), self.cu(0xFFFFFFFF)
+        if signed:
+            upper_if_fit, negative, limit = (self.tmp() for _ in range(3))
+            self.emit(f"{upper_if_fit} = OpShiftRightArithmetic %uint {low} {self.cu(31)}")
+            self.emit(f"{negative} = OpSLessThan %bool {high} {self.cu(0)}")
+            self.emit(f"{limit} = OpSelect %uint {negative} {self.cu(0x80000000)} {self.cu(0x7FFFFFFF)}")
+        fits, result = self.tmp(), self.tmp()
+        self.emit(f"{fits} = OpIEqual %bool {high} {upper_if_fit}")
+        self.emit(f"{result} = OpSelect %uint {fits} {low} {limit}")
+        return result
 
     def saturate_int16(self, bits: str, signed: bool) -> str:
         """Return the saturated integer as 16 bits in the low half of a uint."""
