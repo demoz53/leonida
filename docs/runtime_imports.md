@@ -202,14 +202,16 @@ What this does not show: `--run` has not been run, so the entry point has not be
 reached on the way to the first frame. A bound import is not a working one (the binding only says a function with
 that name exists), and an unimplemented import stops the run only if the title calls it
 ([When an unimplemented import is called](#when-an-unimplemented-import-is-called)). The executable imports 25
-functions from `ws2_32.dll` (23 by ordinal, plus `getaddrinfo` and `freeaddrinfo`) and the loader binds them to the
-host's, so a `--run` can open real sockets: run it with the network off. `winhttp.dll` is served by the offline shim, which opens none, and `mfplat.dll` is partially overridden so
+functions from `ws2_32.dll` (23 by ordinal, plus `getaddrinfo` and `freeaddrinfo`). The `ws2_offline` shim now serves the
+outbound and name-resolution calls among them, loopback only (see the Winsock2 section below), and the remaining
+imports bind to the host's. `winhttp.dll` is served by the offline shim, which opens none, and `mfplat.dll` is partially overridden so
 `MFCreateSourceResolver` wraps the host `IMFSourceResolver` (`runtime/shims/mfplat_offline.cpp`): network schemes
 (`http`, `https`, `rtsp`, `mms`), UNC shares and remote `file://` hosts are refused with `MF_E_UNSUPPORTED_SCHEME`,
 and so is everything else except console paths (`GAME:`, `G:`, `T:`), absolute drive paths and `file:///` URLs that
 name one of those, which are rewritten through `rt::fs::resolve_read_path` before reaching Media Foundation (relative
 and drive-relative paths are refused, and so is a host drive path on a network drive; only the URL methods are gated, not
-byte-stream opens or `MFCreateSourceReaderFromURL`).
+byte-stream opens or `MFCreateSourceReaderFromURL`). Known gap: `dnsapi.dll`
+(`DnsQuery*`) is not shimmed, so a title that calls it reaches the host's resolver.
 
 ## Console paths and the write overlay
 
@@ -652,6 +654,39 @@ end to end with a synthetic bundled DLL importing `xmem.dll!XMemAlloc` and `XMem
 Each refused server is logged once (`[rt] winhttp: offline, refused <host>:<port>`), which records what a title
 tried to reach. `runtime/test/winhttp_offline_test.cpp` (ctest `winhttp_offline`) covers the synchronous and
 asynchronous paths with `.invalid` names; it opens no connection.
+
+## Winsock2 (`ws2_32.dll`) offline
+
+`runtime/shims/ws2_offline.cpp` intercepts outbound Winsock2 entry points — both by name and by standard Windows
+`ws2_32.dll` ordinal (`bind`/`#2`, `connect`/`#4`, `sendto`/`#20`, `gethostbyaddr`/`#51`, `gethostbyname`/`#52`,
+`WSAAsyncGetHostByAddr`/`#102`, `WSAAsyncGetHostByName`/`#103`, `getaddrinfo`, `GetAddrInfoW`, `GetAddrInfoExA/W`,
+`getnameinfo`, `GetNameInfoW`, `WSAConnect`, `WSAConnectByNameA/W`, `WSAConnectByList`, `WSASendTo`, `WSASendMsg`,
+`WSALookupServiceBeginA/W`, and `WSAIoctl` for `WSAID_CONNECTEX` and `WSAID_WSASENDMSG`). `wsock32.dll` maps its
+`bind`, `connect`, `sendto`, `gethostbyaddr`, `gethostbyname` and `WSAAsyncGetHostBy*` exports (and their ordinals) to
+the same wrappers, since its exports forward to `ws2_32.dll` natively; like `ws2_32.dll` it stays host-owned
+(`owns_dll`), so `LoadLibrary` returns the real module. The shim keeps `ws2_32.dll` partially overridden
+so local socket bookkeeping (`WSAStartup`, `socket`, `closesocket`, `select`, `recv`, `send`, byte-order helpers) still
+works for loopback traffic:
+
+- `connect`, `WSAConnect`, `ConnectEx`, `sendto`, `WSASendTo`, `WSASendMsg`, `WSAConnectByNameA/W` and
+  `WSAConnectByList` allow only IPv4 loopback (`127.0.0.0/8`), IPv6 loopback (`::1`) and IPv4-mapped loopback
+  (`::ffff:127.0.0.0/104`); everything else fails with `WSAENETUNREACH`.
+- `WSAConnectByNameA/W` pass `localhost` to the host as the literal `127.0.0.1`, so the host never reads its hosts
+  file. Numeric loopback literals pass through unchanged.
+- `ConnectEx` and `WSASendMsg` from `WSAIoctl` are the host's own pointers, fetched for the socket they are called on
+  (each Winsock provider has its own), after the same loopback check.
+- `bind` narrows wildcard binds (`0.0.0.0`, `::`) to loopback (`127.0.0.1`, `::1`) and refuses other non-loopback
+  addresses with `WSAEADDRNOTAVAIL`.
+- Forward lookups refuse external names with `WSAHOST_NOT_FOUND` without sending DNS traffic. A dotted octet with a
+  leading zero (`0127.0.0.1`) is refused too: Windows reads it as octal, so it is not the loopback address it looks
+  like. `getnameinfo` / `GetNameInfoW` force `NI_NUMERICHOST` (or return `WSAHOST_NOT_FOUND` under `NI_NAMEREQD`) for
+  non-loopback addresses.
+- `WSALookupServiceBeginA/W` (name-service queries) always fail with `WSASERVICE_NOT_FOUND`.
+
+`runtime/test/ws2_offline_test.cpp` (ctest `ws2_offline`) verifies name and ordinal bindings, the `wsock32.dll`
+aliases, external refusals using RFC 5737 / RFC 3849 / `.invalid` targets, the `0127.0.0.1` refusal, the
+`WSASERVICE_NOT_FOUND` refusal, wildcard-bind narrowing, a `ConnectEx` pointer from `WSAIoctl` connecting to a loopback
+listener, and a local loopback UDP round-trip.
 
 ## What this proves and what it does not
 
