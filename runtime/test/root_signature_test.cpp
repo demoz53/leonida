@@ -462,6 +462,33 @@ int main() {
         RootSignature many;
         many.params.assign(65, table());
         check(!pack_stage(many, Stage::Compute).ok, "pack_stage: more than 64 parameters rejected");
+        RootSignature bogus;
+        RootParameter bad_param{};
+        bad_param.type = static_cast<ParamType>(99);
+        bogus.params = {bad_param};
+        check(!pack_stage(bogus, Stage::Compute).ok, "pack_stage: unknown parameter type rejected");
+    }
+
+    // RTS0 constants parameter with poff near UINT32_MAX must not wrap in 32-bit addition.
+    {
+        std::vector<uint8_t> blob;
+        auto push32 = [&](uint32_t v) {
+            blob.push_back(static_cast<uint8_t>(v));
+            blob.push_back(static_cast<uint8_t>(v >> 8));
+            blob.push_back(static_cast<uint8_t>(v >> 16));
+            blob.push_back(static_cast<uint8_t>(v >> 24));
+        };
+        push32(1);           // version 1.0
+        push32(1);           // num_params
+        push32(24);          // params_offset
+        push32(0);           // num_samplers
+        push32(36);          // samplers_offset
+        push32(0);           // flags
+        push32(1);           // dtype = Constants
+        push32(0);           // visibility = All
+        push32(0xFFFFFFFCu); // poff that wraps poff + 4 to 0 in uint32_t
+        const DecodeResult dr = parse_rts0(blob.data(), blob.size());
+        check(!dr.ok, "parse_rts0: constants payload offset near UINT32_MAX does not wrap");
     }
 
     if (g_failures != 0) std::printf("%d FAILURES\n", g_failures);
