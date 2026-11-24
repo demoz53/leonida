@@ -292,6 +292,34 @@ int main() {
             EXPECT(create(device.p, bad, refused) == E_NOTIMPL && !refused.p);
         }
 
+        // A console stream: its numbering has no gap at 23, so its mesh shader is 24 (the PC's AS) and its
+        // RASTERIZER1 26 (the PC's DEPTH_STENCIL2). An AS without an MS is no PC stream, so the layer reads it with the
+        // console's numbering and makes the mesh PSO. The PC reading of the same bytes alone would refuse it.
+        D3D12_RASTERIZER_DESC1 raster1{};
+        raster1.FillMode = D3D12_FILL_MODE_SOLID;
+        raster1.CullMode = D3D12_CULL_MODE_NONE;
+        raster1.DepthClipEnable = TRUE;
+        unsigned console_psos = 0;
+        for (int with_raster1 = 0; with_raster1 < 2; ++with_raster1) {
+            Stream console;
+            console.add(RootSubobject{.inner = root.p});
+            console.add(Subobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE(24), D3D12_SHADER_BYTECODE>{.inner = ms});
+            console.add(PsSubobject{.inner = ps}).add(TargetsSubobject{.inner = one_target()});
+            if (with_raster1)
+                console.add(Subobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE(26), D3D12_RASTERIZER_DESC1>{.inner = raster1});
+            Ref<ID3D12PipelineState> console_pso;
+            const HRESULT console_hr = create(device.p, console, console_pso);
+            if (FAILED(console_hr))
+                std::fprintf(stderr, "console stream %d: 0x%08lx\n", with_raster1, static_cast<unsigned long>(console_hr));
+            EXPECT(SUCCEEDED(console_hr) && console_pso.p);
+            ++console_psos;
+        }
+        // An MS and an AS in PC numbering stay the PC's (and refused, the layer builds no AS).
+        bad = mesh_stream;
+        bad.add(Subobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE(24), D3D12_SHADER_BYTECODE>{.inner = ms});
+        EXPECT(create(device.p, bad, refused) == E_NOTIMPL && !refused.p);
+        std::printf("console-numbered streams: %u mesh PSOs (MS as 24, RASTERIZER1 as 26)\n", console_psos);
+
         const D3D12_HEAP_PROPERTIES default_heap{D3D12_HEAP_TYPE_DEFAULT};
         const D3D12_HEAP_PROPERTIES upload_heap{D3D12_HEAP_TYPE_UPLOAD};
         const D3D12_HEAP_PROPERTIES readback_heap{D3D12_HEAP_TYPE_READBACK};

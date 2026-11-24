@@ -3206,7 +3206,25 @@ struct PipelineStream {
     bool depth_bounds_test = false;
 };
 
-HRESULT parse_pipeline_stream(const D3D12_PIPELINE_STATE_STREAM_DESC& desc, PipelineStream& out) {
+// LEONIDA_XS_STREAM_ENUM=pc: never read a stream with the console's numbering (below).
+bool console_stream_enum_enabled() {
+    static const bool enabled = [] {
+        char value[8] = {};
+        const DWORD n = GetEnvironmentVariableA("LEONIDA_XS_STREAM_ENUM", value, sizeof(value));
+        return !(n == 2 && (value[0] == 'p' || value[0] == 'P') && (value[1] == 'c' || value[1] == 'C'));
+    }();
+    return enabled;
+}
+
+// console_enum: read the types with the console's numbering, which has no gap at 23 where the PC's has one (PC:
+// VIEW_INSTANCING 22, AS 24, MS 25, DEPTH_STENCIL2 26, ...; console: AS 23, MS 24, ...), so a type from 23 on is the PC
+// type one above it. Evidence (docs/retail_boot_intel_host.md section 3): in a retail boot, the 430 streams whose
+// subobject 24 the PC reading took for an AS each carried a payload the size of one of the title's mesh-shader
+// containers (430 of 430; 280 of those sizes match no vertex shader), and none of them had a 25.
+// CreatePipelineState uses it only for a stream the PC reading leaves with an AS and no MS, which the PC runtime
+// refuses (an AS needs an MS) and this layer refuses too, so no stream that works today is read differently.
+HRESULT parse_pipeline_stream(const D3D12_PIPELINE_STATE_STREAM_DESC& desc, PipelineStream& out,
+                              bool console_enum = false) {
     if (!desc.pPipelineStateSubobjectStream || !desc.SizeInBytes) return E_INVALIDARG;
     D3D12_GRAPHICS_PIPELINE_STATE_DESC& g = out.graphics;
     for (auto& target : g.BlendState.RenderTarget) {
@@ -3238,6 +3256,8 @@ HRESULT parse_pipeline_stream(const D3D12_PIPELINE_STATE_STREAM_DESC& desc, Pipe
         D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type;
         if (size - at < sizeof(type)) return E_INVALIDARG;
         std::memcpy(&type, base + at, sizeof(type));
+        if (console_enum && unsigned(type) >= 23 && unsigned(type) < 63)
+            type = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE(unsigned(type) + 1);
         // The versioned depth-stencil and rasterizer subobjects describe the same state as their base type, so the
         // stream contract counts any two of one family as duplicates; the payload below still follows `type`.
         D3D12_PIPELINE_STATE_SUBOBJECT_TYPE family = type;
@@ -6419,7 +6439,26 @@ public:
         *out = nullptr;
         if (!desc) return d3d12_trace::result(method, E_INVALIDARG);
         PipelineStream stream;
-        if (const HRESULT hr = parse_pipeline_stream(*desc, stream); FAILED(hr)) return d3d12_trace::result(method, hr);
+        HRESULT parsed = parse_pipeline_stream(*desc, stream);
+        // A stream the PC reading refuses, or leaves with an AS and no MS (no valid PC stream), is read again with the
+        // console's numbering (parse_pipeline_stream), and that reading is taken when it holds a mesh shader (its 24)
+        // and no AS. A stream the PC reading accepts as valid is never read differently. LEONIDA_XS_STREAM_ENUM=pc
+        // keeps the PC reading alone (such PSOs are then refused, as before).
+        if ((FAILED(parsed) || (stream.as.pShaderBytecode && !stream.ms.pShaderBytecode)) &&
+            console_stream_enum_enabled()) {
+            PipelineStream console;
+            if (SUCCEEDED(parse_pipeline_stream(*desc, console, true)) && console.ms.pShaderBytecode &&
+                !console.as.pShaderBytecode) {
+                static std::atomic<unsigned> renumbered{0};
+                if (renumbered.fetch_add(1, std::memory_order_relaxed) == 0)
+                    std::fprintf(stderr, "[rt] d3d12: a pipeline stream the PC numbering cannot read (an AS and no MS, "
+                                         "or refused) is read with the console's subobject numbering (its 24 is the "
+                                         "mesh shader); LEONIDA_XS_STREAM_ENUM=pc turns this off\n");
+                stream = console;
+                parsed = S_OK;
+            }
+        }
+        if (FAILED(parsed)) return d3d12_trace::result(method, parsed);
         auto* pipeline = new PipelineState(state_);
         pipeline->attach_device(identity());
         const HRESULT hr =
