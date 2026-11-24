@@ -1161,7 +1161,7 @@ def run_suite(a, work: str) -> int:
                       "cs_w64x_lds_war", "cs_w64x_partial", "cs_w64x_sbarrier", "cs_w64x_load_ballot_load",
                       "cs_w64x_mask_reuse", "cs_w64x_mask_reuse2", "cs_w64x_chain_barrier", "cs_barrier_divergent",
                       "cs_bpermute32", "cs_w64x_partial_scmp", "cs_w32_partial_scmp", "cs_w32_partial_permute", "cs_barrier_early_end",
-                      "cs_barrier_loop", "cs_w64x_andn2_exec", "cs_w64x_saveexec_b64", "cs_lds_b64_cmpst", "cs_lds_xchg64_ext", "cs_relidx_ext", "cs_lds_atomics_ext", "cs_w32_andn2_exec",
+                      "cs_barrier_loop", "cs_w64x_andn2_exec", "cs_w64x_saveexec_b64", "cs_lds_b64_cmpst", "cs_lds_xchg64_ext", "cs_relidx_ext", "cs_lds_atomics_ext", "cs_w32_andn2_exec", "cs_valu16_ext",
                       "cs_mask_vgpr_exec", "cs_w32_exec_computed", "cs_w64_exec_computed"):
             cs_dump_wants = {
                 "cs_store": [0x400080FF, 0xE00003FF, 0x3C004000, 0xEEEEEEEE, 0x40003C00, 0xBC003800, 0x40FF8000, 0x3FF00000],
@@ -1196,6 +1196,9 @@ def run_suite(a, work: str) -> int:
                 # ds_cmpst_b32 and the b64 2-address forms (cs_lds_b64_cmpst.asm header)
                 "cs_lds_b64_cmpst": [0x11110001, 0x22220002, 0x33330003, 0x44440004,
                                      0xCCCC000C, 0x44440004, 0xBBBB000B, 0x3579BADC],
+                # v_add/sub_nc_i16, 16-bit min3/max3/med3, v_pk_add_u16 clamp, v_pk_mad_i16 (cs_valu16_ext.asm header)
+                "cs_valu16_ext": [0xA5A57FFF, 0x8000A5A5, 0xA5A58000, 0xA5A50003,
+                                  0x0003FFFB, 0x3C00C000, 0xFFFF0008, 0x0007000C],
                 # ds_wrxchg*_rtn_b64, ds_or_rtn_b64, ds_min_f32, ds_max_rtn_f32 (cs_lds_xchg64_ext.asm header)
                 "cs_lds_xchg64_ext": [0x11110003, 0x33333333, 0xF00FF000, 0x04030201,
                                     0x40302010, 0x70500705, 0x3FC00000, 0x80000000],
@@ -1290,7 +1293,7 @@ def run_suite(a, work: str) -> int:
                                   "cs_w32_lds_u8_d16", "cs_w32_int_ext", "cs_w32_salu64", "cs_w32_misc_ext", "cs_w32_new_ops",
                                   "cs_w32_lds_subdword", "cs_w32_lds_wide",
                                   "cs_bpermute32", "cs_w32_partial_scmp", "cs_w32_partial_permute", "cs_w32_permlane_fi", "cs_w32_sincos", "cs_w32_buffer_sub16", "cs_w32_buffer_store_sub", "cs_w32_fcmpswap",
-                                  "cs_lds_b64_cmpst", "cs_lds_xchg64_ext", "cs_relidx_ext", "cs_lds_atomics_ext", "cs_exec_const", "cs_w32_mask_imm", "cs_mask_vgpr_exec",
+                                  "cs_lds_b64_cmpst", "cs_lds_xchg64_ext", "cs_relidx_ext", "cs_lds_atomics_ext", "cs_exec_const", "cs_w32_mask_imm", "cs_mask_vgpr_exec", "cs_valu16_ext",
                                   "cs_dpp", "cs_dpp_row", "cs_dpp_mask", "cs_dpp8",
                                   "cs_dpp_ops", "cs_dpp_bound", "cs_dpp_bank", "cs_dpp_fi", "cs_w32_andn2_exec",
                                   "cs_w32_exec_computed") and not emulated and not partial
@@ -1317,7 +1320,7 @@ def run_suite(a, work: str) -> int:
                 ok, detail = judge_cs_dump(rc, msg, want, wave64=wave64, partial=partial, emulated=emulated,
                                            hexwords=name in ("cs_store", "cs_smem_soffset_imm", "cs_w32_lds_u8_d16",
                                                              "cs_w32_lds_subdword", "cs_w32_lds_wide",
-                                                             "cs_lds_b64_cmpst", "cs_lds_xchg64_ext", "cs_relidx_ext", "cs_lds_atomics_ext", "cs_signed_zero_nan"))
+                                                             "cs_lds_b64_cmpst", "cs_lds_xchg64_ext", "cs_relidx_ext", "cs_lds_atomics_ext", "cs_signed_zero_nan", "cs_valu16_ext"))
                 if ok and None in want:
                     unjudged = ", ".join(str(i) for i, w in enumerate(want) if w is None)
                     detail += f" (words {unjudged} not judged on this device: UNJUDGED_WORDS in check.py)"
