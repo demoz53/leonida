@@ -164,6 +164,7 @@ private:
     std::vector<Module*> order_;       // mapping order; owns the modules
     std::vector<Module*> init_order_;  // dependencies first, see initialisation_order()
     int runtime_loads_ = 0;  // > 0 while a run-time load or forwarder maps modules (under mutex_): they are dynamic
+    bool registered_xmem_hooks_ = false;
 
     // What find_address reads: one entry per mapped image, added once its memory exists. Under ranges_mutex_, a leaf
     // lock: mutex_ is held while image code runs and the registry holds its own lock around the lookup, so the

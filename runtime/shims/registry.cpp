@@ -581,4 +581,18 @@ void report_called_unimplemented() {
     for (auto& s : g_called) std::fprintf(stderr, "  called: %s\n", s.c_str());
 }
 
+namespace {
+std::atomic<XMemHooksHandler> g_xmem_hooks_handler{nullptr};
+}  // namespace
+
+void set_xmem_hooks_handler(XMemHooksHandler handler) {
+    g_xmem_hooks_handler.store(handler, std::memory_order_release);
+}
+
+void notify_xmem_allocation_hooks(const void* hooks) {
+    if (const auto handler = g_xmem_hooks_handler.load(std::memory_order_acquire)) {
+        handler(hooks);
+    }
+}
+
 }  // namespace rt::shims

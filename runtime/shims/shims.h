@@ -105,6 +105,12 @@ void* make_unimplemented_thunk(const std::string& dll, const std::string& name);
 // Prints every unimplemented import that has been called.
 void report_called_unimplemented();
 
+// Optional callback registered by the xmem shim so the PE loader can hand it a mapped image's
+// `__XMemAllocationHooks__` export without creating a hard link dependency from pe_loader to xmem.cpp.
+using XMemHooksHandler = void (*)(const void* hooks);
+void set_xmem_hooks_handler(XMemHooksHandler handler);
+void notify_xmem_allocation_hooks(const void* hooks);
+
 }  // namespace rt::shims
 
 #define SHIM_TABLE(id, ...)                                                       \

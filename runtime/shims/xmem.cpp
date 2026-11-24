@@ -67,15 +67,24 @@ void note_attributes(const char* api, uint64_t attributes, size_t size, const vo
     rt::startup_trace::event("xmem_attributes", fields);
 }
 
+std::atomic<const rt::xmem::XMemAllocationHooks*> g_allocation_hooks{nullptr};
+
 void* allocate_block(size_t size) { return _aligned_malloc(size ? size : 1, kAlign); }
 
 void* __stdcall XMemAlloc(size_t size, uint64_t attributes) {
     note_attributes("XMemAlloc", attributes, size, _ReturnAddress());
+    if (const auto* hooks = g_allocation_hooks.load(std::memory_order_acquire); hooks && hooks->alloc) {
+        return hooks->alloc(size, attributes);
+    }
     return allocate_block(size);
 }
 
 void __stdcall XMemFree(void* p, uint64_t attributes) {
     note_attributes("XMemFree", attributes, kNoSize, _ReturnAddress());
+    if (const auto* hooks = g_allocation_hooks.load(std::memory_order_acquire); hooks && hooks->free) {
+        hooks->free(p, attributes);
+        return;
+    }
     _aligned_free(p);
 }
 
@@ -977,6 +986,12 @@ bool commit_physical_pages(const uint64_t* page_array, size_t count) {
     return true;
 }
 
+void set_allocation_hooks(const XMemAllocationHooks* hooks) {
+    g_allocation_hooks.store(hooks, std::memory_order_release);
+}
+
+const XMemAllocationHooks* allocation_hooks() { return g_allocation_hooks.load(std::memory_order_acquire); }
+
 }
 
 #define TITLE_VIRTUAL_ALLOC(dll)                                          \
@@ -1013,3 +1028,14 @@ SHIM_TABLE(xmem,
     {"xmem.dll", "XMemMapPhysicalPages", reinterpret_cast<void*>(&XMemMapPhysicalPages)},
     {"xmem.dll", "XMemMapPhysicalPagesScatter", reinterpret_cast<void*>(&XMemMapPhysicalPagesScatter)},
 );
+
+namespace {
+struct XMemHooksHandlerInstaller {
+    XMemHooksHandlerInstaller() {
+        rt::shims::set_xmem_hooks_handler([](const void* hooks) {
+            rt::xmem::set_allocation_hooks(static_cast<const rt::xmem::XMemAllocationHooks*>(hooks));
+        });
+    }
+};
+const XMemHooksHandlerInstaller g_xmem_hooks_handler_installer;
+}  // namespace

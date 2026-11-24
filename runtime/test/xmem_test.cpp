@@ -1103,6 +1103,50 @@ int main() {
     test_title_virtual_alloc();
 
     if (alloc_default && free_default) test_default_alloc(alloc, free_mem, alloc_default, free_default);
+    if (alloc_default && free_default) {
+        static void*(__stdcall* s_default_alloc)(size_t, uint64_t) = nullptr;
+        static void(__stdcall* s_default_free)(void*, uint64_t) = nullptr;
+        static int s_alloc_hook_calls = 0;
+        static int s_free_hook_calls = 0;
+        static uint64_t s_last_attr = 0;
+        s_default_alloc = alloc_default;
+        s_default_free = free_default;
+        s_alloc_hook_calls = 0;
+        s_free_hook_calls = 0;
+        s_last_attr = 0;
+
+        const rt::xmem::XMemAllocationHooks hooks{
+            [](std::size_t size, std::uint64_t attributes) -> void* {
+                ++s_alloc_hook_calls;
+                s_last_attr = attributes;
+                return s_default_alloc(size, attributes);
+            },
+            [](void* ptr, std::uint64_t attributes) {
+                ++s_free_hook_calls;
+                s_last_attr = attributes;
+                s_default_free(ptr, attributes);
+            },
+        };
+        rt::shims::notify_xmem_allocation_hooks(&hooks);
+        void* const p1 = alloc(128, 0xf0814000ULL);
+        check(p1 != nullptr, "__XMemAllocationHooks__ alloc hook returns non-null");
+        check(s_alloc_hook_calls == 1 && s_last_attr == 0xf0814000ULL,
+              "XMemAlloc forwards to registered alloc hook with attributes");
+        void* const p2 = alloc_default(64, 0x3ULL);
+        check(p2 != nullptr && s_alloc_hook_calls == 1,
+              "XMemAllocDefault bypasses registered alloc hook");
+        free_default(p2, 0x3ULL);
+        check(s_free_hook_calls == 0, "XMemFreeDefault bypasses registered free hook");
+        free_mem(p1, 0xf0814000ULL);
+        check(s_free_hook_calls == 1 && s_last_attr == 0xf0814000ULL,
+              "XMemFree forwards to registered free hook with attributes");
+
+        rt::shims::notify_xmem_allocation_hooks(nullptr);
+        void* const p3 = alloc(64, 0x1ULL);
+        check(p3 != nullptr && s_alloc_hook_calls == 1, "clearing allocation hooks restores default XMemAlloc");
+        free_mem(p3, 0x1ULL);
+        check(s_free_hook_calls == 1, "clearing allocation hooks restores default XMemFree");
+    }
     if (tools_mem) check(tools_mem() == FALSE, "XMemIsToolsMemAvailable returns FALSE (no devkit tools memory)");
     if (virtual_alloc && physical.allocate && physical.free_pages && physical.map && physical.scatter) {
         test_physical_pages(physical);
