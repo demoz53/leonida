@@ -123,9 +123,9 @@ class SadTests(unittest.TestCase):
         self.assertEqual(run_lines(["s_mov_b32 s2, 0x01010101", "v_mov_b32 v1, 0x03030303", "v_sad_u8 v0, s2, v1, 7"]),
                          7 + 4 * 2)
 
-    def test_clamp_is_rejected_not_guessed(self):
-        with self.assertRaises(rdna2spirv.Unsupported):
-            run_lines(["v_mov_b32 v1, 1", "v_sad_u8 v0, v1, v1, v1 clamp"])
+    def test_clamp_saturates_on_overflow(self):
+        regs = run_lines(["v_mov_b32 v1, 0xff", "v_mov_b32 v2, 0", "v_mov_b32 v3, 0xffffff80", "v_sad_u8 v0, v1, v2, v3 clamp"])
+        self.assertEqual(regs, 0xFFFFFFFF)
 
 
 if __name__ == "__main__":

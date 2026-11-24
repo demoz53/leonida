@@ -606,17 +606,18 @@ class TestTranslatedShaderExecution(unittest.TestCase):
         words, _ = run_synthetic_shader(asm)
         self.assertEqual(words, [30, 30, 30, 30])
 
-    def test_clamp_modifier_rejected(self) -> None:
-        """v_sad_u32 with clamp modifier raises Unsupported rather than guessing."""
+    def test_clamp_modifier_saturates(self) -> None:
+        """v_sad_u32 with clamp modifier saturates unsigned 32-bit overflow to 0xFFFFFFFF."""
         asm = [
-            "v_mov_b32 v1, 1",
-            "v_sad_u32 v0, v1, v1, v1 clamp",
+            "v_mov_b32 v1, 0x100",
+            "v_mov_b32 v2, 0",
+            "v_mov_b32 v3, 0xffffff80",
+            "v_sad_u32 v0, v1, v2, v3 clamp",
             "exp mrt0 v0, v0, v0, v0 done vm",
             "s_endpgm",
         ]
-        with self.assertRaises(rdna2spirv.Unsupported) as cm:
-            run_synthetic_shader(asm)
-        self.assertIn("v_sad_u32 clamp", str(cm.exception))
+        res = run_synthetic_shader(asm)
+        self.assertEqual(res[0][0], 0xFFFFFFFF)
 
     def test_v_sad_hi_u32_opcode_unsupported(self) -> None:
         """v_sad_hi_u32 is not a valid RDNA2 opcode and must raise Unsupported."""
