@@ -49,6 +49,17 @@ docs/        notes
 
 ## Day one, when the exe is here
 
+First check that it is the same file everyone else measured:
+
+```powershell
+python -I tools/exe_sha.py "<game>\game_scarlett_master.exe"
+```
+
+That prints the image's size and SHA-256 and compares them with the numbers the package manifest records
+(`expected_exe_size`, `expected_exe_sha256`), exiting 1 when they differ; `--expect SHA256` checks against a hash
+someone quoted and `--print-keys` writes the two manifest lines. A copy that is truncated or patched otherwise
+reports as "Executable found" and quietly shifts every RVA a note is written against.
+
 ```powershell
 .\scripts\first_look.ps1 -Exe "<game>\game_scarlett_master.exe"
 ```
