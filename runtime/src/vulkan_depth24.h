@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -61,32 +62,46 @@ public:
         // D24, three and four for 96-bit texels).
         const std::uint64_t aw = std::uint64_t(whole.width) * whole.app_texel_words();
         const std::uint64_t sw = std::uint64_t(whole.width) * whole.scratch_texel_words();
-        if (!loaded_ || !make_pipeline() || !whole.app || !whole.width || !whole.height || !whole.slices ||
-            whole.app_offset % 4 || whole.app_row_words < aw ||
-            whole.app_slice_words < std::uint64_t(whole.app_row_words) * (whole.height - 1) + aw)
+        if (!loaded_ || !whole.app || !whole.width || !whole.height || !whole.slices ||
+            whole.app_offset % 4 || whole.app_offset > whole.app_size ||
+            (whole.scratch && whole.scratch_offset % 4) || whole.app_row_words < aw)
             return false;
         const std::uint64_t h = whole.height, s = whole.slices;
-        const std::uint64_t span_words = (s - 1) * whole.app_slice_words + (h - 1) * whole.app_row_words + aw;
-        if (whole.app_offset + span_words * 4 > whole.app_size) return false;
-        if (!whole.scratch && !scratch(sw * h * s * 4, whole.scratch, whole.scratch_offset)) return false;
+        std::uint64_t one_slice_app_words = 0, span_words = 0, span_bytes = 0;
+        if (!checked_add(std::uint64_t(whole.app_row_words) * (h - 1), aw, one_slice_app_words) ||
+            whole.app_slice_words < one_slice_app_words ||
+            !checked_add((s - 1) * std::uint64_t(whole.app_slice_words), one_slice_app_words, span_words) ||
+            !checked_mul(span_words, 4, span_bytes) || span_bytes > whole.app_size - whole.app_offset)
+            return false;
+        std::uint64_t one_slice_scratch_words = 0, total_scratch_words = 0, total_scratch_bytes = 0;
+        if (!checked_mul(sw, h, one_slice_scratch_words) ||
+            !checked_mul(one_slice_scratch_words, s, total_scratch_words) ||
+            !checked_mul(total_scratch_words, 4, total_scratch_bytes))
+            return false;
+        if (whole.scratch) {
+            std::uint64_t scratch_end = 0;
+            if (!checked_add(whole.scratch_offset, total_scratch_bytes, scratch_end)) return false;
+        }
 
         // A window starts at a multiple of 256 (the largest minStorageBufferOffsetAlignment), which costs up to 252 bytes.
         constexpr std::uint64_t slack = 256;
-        const std::uint64_t limit = max_range_;
-        const auto app_bytes = [&](std::uint64_t slices, std::uint64_t rows) {
-            return ((slices - 1) * whole.app_slice_words + (rows - 1) * whole.app_row_words + aw) * 4 + slack;
-        };
-        const auto scratch_bytes = [&](std::uint64_t slices, std::uint64_t rows) { return slices * rows * sw * 4 + slack; };
-        std::uint64_t slices_per_part = 0;  // 0: a slice alone is too big
-        while (slices_per_part < s && app_bytes(slices_per_part + 1, h) <= limit && scratch_bytes(slices_per_part + 1, h) <= limit)
-            ++slices_per_part;
+        if (max_range_ <= slack) return false;
+        const std::uint64_t avail_words = (max_range_ - slack) / 4;
+        const std::uint64_t max_slices_app =
+            one_slice_app_words <= avail_words ? 1 + (avail_words - one_slice_app_words) / whole.app_slice_words : 0;
+        const std::uint64_t max_slices_scratch = avail_words / one_slice_scratch_words;
+        const std::uint64_t slices_per_part = std::min(s, std::min(max_slices_app, max_slices_scratch));
         std::uint64_t rows_per_part = h;
         if (!slices_per_part) {
-            rows_per_part = 0;
-            while (rows_per_part < h && app_bytes(1, rows_per_part + 1) <= limit && scratch_bytes(1, rows_per_part + 1) <= limit)
-                ++rows_per_part;
+            const std::uint64_t max_rows_app =
+                aw <= avail_words ? 1 + (avail_words - aw) / whole.app_row_words : 0;
+            const std::uint64_t max_rows_scratch = avail_words / sw;
+            rows_per_part = std::min(h, std::min(max_rows_app, max_rows_scratch));
             if (!rows_per_part) return false;
         }
+
+        if (!make_pipeline()) return false;
+        if (!whole.scratch && !scratch(total_scratch_bytes, whole.scratch, whole.scratch_offset)) return false;
         parts.clear();
         for (std::uint64_t z = 0; z < s;) {
             const std::uint64_t n = slices_per_part ? std::min(slices_per_part, s - z) : 1;
@@ -105,7 +120,6 @@ public:
         return true;
     }
 
-
     // Records the dispatch. The caller records the barriers around it.
     void run(VkCommandBuffer command_buffer, const Depth24Job& job) const {
         struct Push {
@@ -116,7 +130,8 @@ public:
         vk_.vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout_, 0, 1, &job.set, 0,
                                     nullptr);
         vk_.vkCmdPushConstants(command_buffer, pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-        vk_.vkCmdDispatch(command_buffer, (job.width + 7) / 8, (job.height + 7) / 8, job.slices);
+        const auto groups = [](std::uint32_t n) { return static_cast<std::uint32_t>((std::uint64_t(n) + 7u) / 8u); };
+        vk_.vkCmdDispatch(command_buffer, groups(job.width), groups(job.height), job.slices);
     }
 
     // The jobs prepared since the last call belong to a submission that `timeline` reaches `ticket` for.
@@ -164,6 +179,18 @@ public:
     }
 
 private:
+    static bool checked_add(std::uint64_t a, std::uint64_t b, std::uint64_t& out) {
+        if (b > std::numeric_limits<std::uint64_t>::max() - a) return false;
+        out = a + b;
+        return true;
+    }
+
+    static bool checked_mul(std::uint64_t a, std::uint64_t b, std::uint64_t& out) {
+        if (a && b > std::numeric_limits<std::uint64_t>::max() / a) return false;
+        out = a * b;
+        return true;
+    }
+
     struct Chunk {
         VkBuffer buffer = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -251,11 +278,13 @@ private:
                                     (std::uint64_t(part.height) - 1) * part.app_row_words +
                                     std::uint64_t(part.width) * part.app_texel_words()) * 4;
         const std::uint64_t window = part.app_offset / alignment * alignment;
-        const std::uint64_t range = part.app_offset - window + span;
+        std::uint64_t range = 0;
+        if (!checked_add(part.app_offset - window, span, range)) return false;
         const std::uint64_t tight = std::uint64_t(part.width) * part.scratch_texel_words() * part.height * part.slices * 4;
         const std::uint64_t scratch_window = part.scratch_offset / alignment * alignment;
-        const std::uint64_t scratch_range = part.scratch_offset - scratch_window + tight;
-        if (window + range > app_size) return false;
+        std::uint64_t scratch_range = 0;
+        if (!checked_add(part.scratch_offset - scratch_window, tight, scratch_range)) return false;
+        if (window > app_size || range > app_size - window) return false;
         part.app_base_words = std::uint32_t((part.app_offset - window) / 4);
         part.scratch_base_words = std::uint32_t((part.scratch_offset - scratch_window) / 4);
         part.set = allocate_set();
@@ -300,13 +329,18 @@ private:
     // `bytes` of scratch, aligned for a descriptor offset, from this submission's chunks.
     bool scratch(std::uint64_t bytes, VkBuffer& buffer, VkDeviceSize& offset) {
         constexpr VkDeviceSize alignment = 256, minimum = 4u << 20;
+        if (!bytes) return false;
         for (auto& chunk : current_.chunks) {
-            const VkDeviceSize start = (chunk.used + alignment - 1) / alignment * alignment;
-            if (start + bytes <= chunk.size) {
-                chunk.used = start + bytes;
-                buffer = chunk.buffer;
-                offset = start;
-                return true;
+            const VkDeviceSize rem = chunk.used % alignment;
+            const VkDeviceSize pad = rem ? alignment - rem : 0;
+            if (pad <= chunk.size - chunk.used) {
+                const VkDeviceSize start = chunk.used + pad;
+                if (bytes <= chunk.size - start) {
+                    chunk.used = start + bytes;
+                    buffer = chunk.buffer;
+                    offset = start;
+                    return true;
+                }
             }
         }
         Chunk chunk;
